@@ -148,11 +148,32 @@ share of answers that are right and would be marked wrong by string comparison.
 
 ## Performance
 
-Roughly 30 ms per task for example scoring and 7 ms per equivalence comparison,
-so a full Re(gEx|DoS)Eval pass takes about 20 seconds and NL-RX-Turk's 10,000
-equivalence comparisons take about a minute.
+Measured on Re(gEx|DoS)Eval, one candidate costs about **75 ms**, split:
 
-ReDoS screening is the slow part, and unavoidably so: confirming that a pattern
-hangs means waiting out the timeout. A sweep over deliberately-catastrophic
-candidates is dominated by that wait. Use `--workers`; the work is in child
-processes, so threads help.
+| Stage | Cost | Why |
+| --- | --- | --- |
+| ReDoS screening | 54 ms | one child process per probe length |
+| Example scoring | 18 ms | one child process for the whole batch |
+| Equivalence | 4 ms | no subprocess at all |
+
+Screening dominates, and it is the part that has to start processes: the only
+way to know a pattern hangs is to run it somewhere killable. A `--use-reference`
+pass over all 762 tasks takes about 20 seconds, and NL-RX-Turk's 10,000
+equivalence comparisons — no examples, no screening — take about a minute.
+
+Vulnerable candidates cost more, and unavoidably so: confirming a hang means
+waiting out the timeout, once per example. A candidate that hangs on all 25 of
+a task's examples costs 25 seconds at the default one-second budget. That is
+not a rare case — 14.2% of the corpus's own references are vulnerable, so a
+model trained on this kind of data will produce plenty.
+
+Two levers:
+
+* **`--workers 8`.** The work is in child processes, so threads help.
+* **`--timeout 0.1`.** A tenth of a second is still far more than a healthy
+  match needs, and it cuts the cost of every hang by ten.
+
+Set the timeout too low and slow-but-fine patterns start reporting as timeouts,
+which show up as failed examples. If a score moves when you change the timeout,
+that is what happened — so change it once, deliberately, and keep it fixed
+across the runs you intend to compare.

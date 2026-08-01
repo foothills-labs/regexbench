@@ -155,3 +155,26 @@ class TestRun:
         )
         assert main(["run", "tasks", str(tasks), "--use-reference", "--quiet"]) == 0
         assert "1 tasks, 1 answered" in capsys.readouterr().out
+
+
+def test_limit_narrows_a_full_predictions_file(tmp_path, capsys):
+    """--limit asks for a subset, so predictions for the cut tasks are expected.
+
+    Without this the harness's unknown-name check makes --limit unusable with a
+    real predictions file, which is exactly when you reach for it.
+    """
+    dataset = tmp_path / "RegexEval.json"
+    dataset.write_text(json.dumps(REGEXEVAL_RECORDS), encoding="utf-8")
+    predictions = tmp_path / "preds.json"
+    predictions.write_text(
+        json.dumps({"regexeval/7": "[0-9]{3}", "regexeval/8": "a+"}), encoding="utf-8"
+    )
+    exit_code = main(
+        [
+            "run", "regexeval", str(dataset),
+            "--predictions", str(predictions),
+            "--limit", "1", "--quiet",
+        ]
+    )
+    assert exit_code == 0
+    assert "1 tasks, 1 answered" in capsys.readouterr().out

@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 
 from ._parse import Alternate, CharSet, Concat, Node, Repeat, Unsupported, parse
-from .execute import MatchTimeout, safe_search
+from .execute import match_many
 from .types import Risk, SafetyResult
 
 __all__ = ["screen", "attack_strings"]
@@ -170,10 +170,22 @@ def attack_strings(pattern: str, length: int = 20) -> list[str]:
 
 def _empirical(pattern: str) -> SafetyResult | None:
     for length in _PROBE_LENGTHS:
-        for probe in attack_strings(pattern, length):
-            try:
-                safe_search(pattern, probe, timeout=_PROBE_TIMEOUT)
-            except MatchTimeout:
+        probes = attack_strings(pattern, length)
+        if not probes:
+            continue
+        # One child for all of this length's probes rather than one each: a
+        # pattern generates around six per length, and screening was spending
+        # nineteen process starts to answer a question that needs three.
+        # resume=False because the first hang already settles it.
+        try:
+            outcomes = match_many(
+                pattern, probes, method="search", timeout=_PROBE_TIMEOUT, resume=False
+            )
+        except re.error:
+            return None
+
+        for probe, outcome in zip(probes, outcomes, strict=True):
+            if outcome is None:
                 risk = Risk.EXPONENTIAL if length <= _PROBE_LENGTHS[0] else Risk.POLYNOMIAL
                 return SafetyResult(
                     risk,
@@ -181,6 +193,4 @@ def _empirical(pattern: str) -> SafetyResult | None:
                     f"{len(probe)}-character input",
                     witness=probe,
                 )
-            except re.error:
-                return None
     return None

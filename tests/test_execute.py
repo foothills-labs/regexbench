@@ -114,3 +114,16 @@ def test_a_batch_that_hangs_everywhere_stays_linear():
 
     assert outcomes == [None] * 6
     assert elapsed < 4.0, f"took {elapsed:.1f}s — the budget is scaling with the batch"
+
+
+def test_resume_false_stops_at_the_first_timeout():
+    """The ReDoS probe stops as soon as anything hangs — the rest is wasted budget."""
+    attacks = ["b", "a" * 40 + "!", "b", "b"]
+    start = time.time()
+    outcomes = match_many(CATASTROPHIC, attacks, timeout=0.4, resume=False)
+    elapsed = time.time() - start
+
+    assert outcomes[0] is False
+    assert outcomes[1] is None
+    assert outcomes[2] is None, "everything after the first timeout is left unanswered"
+    assert elapsed < 2.0, f"took {elapsed:.1f}s — it kept probing after the first hang"

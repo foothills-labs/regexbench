@@ -144,6 +144,7 @@ def match_many(
     *,
     method: str = "fullmatch",
     timeout: float = _DEFAULT_TIMEOUT,
+    resume: bool = True,
 ) -> list[bool | None]:
     """Match `pattern` against every text, one child process for the batch.
 
@@ -151,6 +152,11 @@ def match_many(
     text ran out of time. `timeout` is the budget for a single text, so a
     batch of ten with a one second timeout may take ten seconds — but a batch
     that behaves takes one process start in total, not ten.
+
+    `resume=False` stops at the first text that times out and leaves the rest
+    None. Use it when one timeout already answers the question — the ReDoS
+    probe stops as soon as any attack string hangs — since resuming means
+    waiting out the budget again for every remaining text.
 
     Raises ``re.error`` if the pattern does not compile.
     """
@@ -162,7 +168,7 @@ def match_many(
         results, exhausted = _run_batch(pattern, batch, method, timeout)
         for offset, matched in results.items():
             outcomes[pending[offset]] = matched
-        if not exhausted:
+        if not exhausted or not resume:
             break
         # The first text with no answer is the one still running when the
         # budget expired. Record it as a timeout and resume after it, so a

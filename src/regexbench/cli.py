@@ -97,6 +97,15 @@ def _run(args: argparse.Namespace) -> int:
         predictions: object = [task.reference for task in tasks]
     elif args.predictions:
         predictions = _load_predictions(args.predictions)
+        if args.limit is not None and isinstance(predictions, dict):
+            # --limit asks for a subset, so predictions for the tasks it cut
+            # are expected rather than a mismatch. Without this, the harness's
+            # unknown-name check makes --limit unusable with a full
+            # predictions file — which is exactly when you want it.
+            wanted = {task.name for task in tasks}
+            predictions = {
+                name: value for name, value in predictions.items() if name in wanted
+            }
     else:
         print("one of --predictions or --use-reference is required", file=sys.stderr)
         return 2
