@@ -7,7 +7,7 @@ import re
 from .equivalence import equivalent
 from .execute import MatchTimeout, safe_fullmatch, safe_search
 from .safety import screen
-from .types import CorrectnessResult, Report, Semantics, Task
+from .types import CorrectnessResult, Dialect, Report, Risk, SafetyResult, Semantics, Task
 
 __all__ = ["check", "evaluate"]
 
@@ -19,10 +19,20 @@ def check(pattern: str, task: Task, timeout: float = 1.0) -> CorrectnessResult:
     counts as a failed example rather than an exception, so one pathological
     pattern cannot abort a benchmark sweep.
     """
+    total = len(task.positives) + len(task.negatives)
+
+    if task.dialect is Dialect.BRICS:
+        # `re` would compile `(a)&(b)` happily, as a literal — running these
+        # would produce confident nonsense rather than an error.
+        if not total:
+            return CorrectnessResult(0, 0)
+        return CorrectnessResult(
+            0, total, error="dk.brics patterns are specifications, not runnable by re"
+        )
+
     try:
         re.compile(pattern)
     except re.error as exc:
-        total = len(task.positives) + len(task.negatives)
         return CorrectnessResult(0, total, error=f"does not compile: {exc}")
 
     match = safe_search if task.semantics is Semantics.SEARCH else safe_fullmatch
@@ -62,9 +72,17 @@ def evaluate(pattern: str, task: Task, timeout: float = 1.0) -> Report:
     """Full assessment: correctness, ReDoS safety, and equivalence if a
     reference pattern is available."""
     correctness = check(pattern, task, timeout=timeout)
-    safety = screen(pattern)
+
+    if task.dialect is Dialect.BRICS:
+        # ReDoS is a property of backtracking engines. A dk.brics pattern is
+        # destined for an automaton, where matching is linear by construction,
+        # so screening it would be answering a question nobody asked.
+        safety = SafetyResult(Risk.SAFE, reason="not screened: dk.brics patterns are not run by re")
+    else:
+        safety = screen(pattern)
+
     equivalence = (
-        equivalent(pattern, task.reference, semantics=task.semantics)
+        equivalent(pattern, task.reference, semantics=task.semantics, dialect=task.dialect)
         if task.reference
         else None
     )

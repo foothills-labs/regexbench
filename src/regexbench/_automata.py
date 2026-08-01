@@ -11,7 +11,18 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
-from ._parse import OTHER, Alternate, CharSet, Concat, Empty, Node, Repeat, Unsupported
+from ._parse import (
+    OTHER,
+    Alternate,
+    CharSet,
+    Complement,
+    Concat,
+    Empty,
+    Intersect,
+    Node,
+    Repeat,
+    Unsupported,
+)
 
 __all__ = ["build_dfa", "find_distinguishing_string", "DFA"]
 
@@ -21,9 +32,13 @@ _MAX_STATES = 20_000
 class _NFA:
     """Thompson construction: epsilon transitions, one start, one accept."""
 
-    def __init__(self) -> None:
+    def __init__(self, alphabet: tuple[str, ...]) -> None:
         self.transitions: dict[int, list[tuple[CharSet | None, int]]] = {}
         self.count = 0
+        # Needed because complement and intersection are not Thompson
+        # constructions: they are computed on determinized sub-machines, which
+        # requires knowing the alphabet.
+        self.alphabet = alphabet
 
     def new_state(self) -> int:
         state = self.count
@@ -67,8 +82,38 @@ class _NFA:
         elif isinstance(node, Repeat):
             self._emit_repeat(node, start, accept)
 
+        elif isinstance(node, Complement):
+            inner = build_dfa(node.node, self.alphabet)
+            self._embed(_complement(inner), start, accept)
+
+        elif isinstance(node, Intersect):
+            combined = build_dfa(node.parts[0], self.alphabet)
+            for part in node.parts[1:]:
+                combined = _intersect(combined, build_dfa(part, self.alphabet))
+            self._embed(combined, start, accept)
+
         else:  # pragma: no cover - all node types are handled above
             raise Unsupported(f"cannot compile node {type(node).__name__}")
+
+    def _embed(self, dfa: DFA, start: int, accept: int) -> None:
+        """Splice a finished DFA into this NFA as one fragment.
+
+        Complement and intersection have to determinize their operands, but
+        the result still has to compose with concatenation, repetition and the
+        rest. A DFA is a special case of an NFA, so it can simply be copied in
+        and its accepting states linked to the fragment's exit.
+        """
+        named = frozenset(symbol for symbol in dfa.alphabet if symbol != OTHER)
+        mirror = {state: self.new_state() for state in dfa.delta}
+        self.link(start, mirror[dfa.start])
+        for state, row in dfa.delta.items():
+            for symbol, destination in row.items():
+                # A set matching only OTHER is the negation of every named
+                # character, which is exactly what OTHER stands for.
+                on = CharSet(named, negated=True) if symbol == OTHER else CharSet(frozenset(symbol))
+                self.link(mirror[state], mirror[destination], on)
+        for state in dfa.accepting:
+            self.link(mirror[state], accept)
 
     def _emit_repeat(self, node: Repeat, start: int, accept: int) -> None:
         low, high = node.minimum, node.maximum
@@ -135,9 +180,50 @@ class DFA:
         return state in self.accepting
 
 
+def _complement(dfa: DFA) -> DFA:
+    """Accept exactly what `dfa` rejects.
+
+    Sound only because the DFA is complete — every state has a transition on
+    every symbol, so rejection is always an explicit state rather than a
+    missing edge.
+    """
+    return DFA(
+        alphabet=dfa.alphabet,
+        delta=dfa.delta,
+        accepting=set(dfa.delta) - dfa.accepting,
+        start=dfa.start,
+    )
+
+
+def _intersect(left: DFA, right: DFA) -> DFA:
+    """Product construction: accept where both machines accept."""
+    alphabet = left.alphabet
+    start = (left.start, right.start)
+    index: dict[tuple[int, int], int] = {start: 0}
+    product = DFA(alphabet=alphabet, start=0)
+    queue: deque[tuple[int, int]] = deque([start])
+
+    while queue:
+        current = queue.popleft()
+        sid = index[current]
+        product.delta[sid] = {}
+        if current[0] in left.accepting and current[1] in right.accepting:
+            product.accepting.add(sid)
+        for symbol in alphabet:
+            nxt = (left.delta[current[0]][symbol], right.delta[current[1]][symbol])
+            if nxt not in index:
+                if len(index) > _MAX_STATES:
+                    raise Unsupported("intersection expands to too many DFA states")
+                index[nxt] = len(index)
+                queue.append(nxt)
+            product.delta[sid][symbol] = index[nxt]
+
+    return product
+
+
 def build_dfa(node: Node, alphabet: tuple[str, ...]) -> DFA:
     """Subset-construct a complete DFA over `alphabet`."""
-    nfa = _NFA()
+    nfa = _NFA(alphabet)
     start, accept = nfa.build(node)
 
     initial = nfa.epsilon_closure(frozenset({start}))

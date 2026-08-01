@@ -35,6 +35,24 @@ class Semantics(enum.Enum):
     SEARCH = "search"
 
 
+class Dialect(enum.Enum):
+    """Which regex language a pattern is written in.
+
+    The natural-language-to-regex corpora (KB13, NL-RX) are written in
+    ``dk.brics.automaton`` syntax — the language the field's own DFA-equality
+    tooling reads — which adds intersection (``&``) and complement (``~``) and
+    has no anchors. Those same characters are ordinary literals in Python, and
+    ``^``/``$`` are literals in dk.brics, so reading one dialect as the other
+    changes the language without raising anything. It has to be stated.
+
+    BRICS patterns are specifications, not runnable Python: ``re`` will
+    happily compile ``(a)&(b)`` as a five-character literal.
+    """
+
+    PYTHON = "python"
+    BRICS = "brics"
+
+
 class Risk(enum.Enum):
     """ReDoS exposure."""
 
@@ -103,6 +121,7 @@ class Task:
     reference: str | None = None
     name: str = ""
     semantics: Semantics = Semantics.FULLMATCH
+    dialect: Dialect = Dialect.PYTHON
 
     def __post_init__(self) -> None:
         if not self.positives and not self.negatives and self.reference is None:

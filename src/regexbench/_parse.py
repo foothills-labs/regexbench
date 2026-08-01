@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .types import Semantics
+from .types import Dialect, Semantics
 
 __all__ = ["parse", "Unsupported", "NonRegular", "Node"]
 
@@ -93,10 +93,25 @@ class Repeat(Node):
     maximum: int | None  # None means unbounded
 
 
+@dataclass(frozen=True)
+class Intersect(Node):
+    """Strings matched by every branch. dk.brics `&`; no Python equivalent."""
+
+    parts: tuple[Node, ...]
+
+
+@dataclass(frozen=True)
+class Complement(Node):
+    """Every string the inner pattern does not match. dk.brics `~`."""
+
+    node: Node
+
+
 def parse(
     pattern: str,
     *,
     semantics: Semantics = Semantics.FULLMATCH,
+    dialect: Dialect = Dialect.PYTHON,
 ) -> tuple[Node, frozenset[str]]:
     """Parse `pattern`, returning its AST and every literal character in it.
 
@@ -105,14 +120,25 @@ def parse(
     the wildcard on whichever end the pattern already anchors. Everything
     downstream then works in full-match terms only, so there is exactly one
     notion of equivalence in the automata layer.
+
+    The dialect must be stated because the two languages overlap without
+    agreeing: ``&`` and ``~`` are operators in dk.brics and ordinary literals
+    in Python, and ``^``/``$`` are anchors in Python and literals in dk.brics.
+    Guessing wrong changes the language silently, which is the one failure
+    mode a benchmark cannot afford.
     """
-    parser = _Parser(pattern)
+    parser = _Parser(pattern, dialect)
     node = parser.parse_alternation()
     if parser.pos != len(parser.src):
         raise Unsupported(f"unexpected {parser.peek()!r} at position {parser.pos}")
     if semantics is Semantics.SEARCH:
         node = _widen_for_search(node, parser.anchored_start, parser.anchored_end)
     return node, frozenset(parser.literals)
+
+
+def any_char() -> CharSet:
+    """A set matching every character, including the OTHER sentinel."""
+    return CharSet(frozenset(), negated=True)
 
 
 def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> Node:
@@ -147,8 +173,10 @@ def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> N
 
 
 class _Parser:
-    def __init__(self, src: str) -> None:
+    def __init__(self, src: str, dialect: Dialect = Dialect.PYTHON) -> None:
         self.src = src
+        self.dialect = dialect
+        self.brics = dialect is Dialect.BRICS
         self.pos = 0
         self.literals: set[str] = set()
         # Recorded rather than inferred later: the parser folds end anchors
@@ -165,17 +193,26 @@ class _Parser:
         return ch
 
     def parse_alternation(self) -> Node:
-        options = [self.parse_concat()]
+        options = [self.parse_intersection()]
         while self.peek() == "|":
             self.eat()
-            options.append(self.parse_concat())
+            options.append(self.parse_intersection())
         return options[0] if len(options) == 1 else Alternate(tuple(options))
+
+    def parse_intersection(self) -> Node:
+        """dk.brics `&`, which binds tighter than `|` and looser than concat."""
+        parts = [self.parse_concat()]
+        while self.brics and self.peek() == "&":
+            self.eat()
+            parts.append(self.parse_concat())
+        return parts[0] if len(parts) == 1 else Intersect(tuple(parts))
 
     def parse_concat(self) -> Node:
         parts: list[Node] = []
+        stop = "|)&" if self.brics else "|)"
         while True:
             ch = self.peek()
-            if ch is None or ch in "|)":
+            if ch is None or ch in stop:
                 break
             parts.append(self.parse_repeat())
         if not parts:
@@ -183,7 +220,7 @@ class _Parser:
         return parts[0] if len(parts) == 1 else Concat(tuple(parts))
 
     def parse_repeat(self) -> Node:
-        node = self.parse_atom()
+        node = self.parse_complement()
         while True:
             ch = self.peek()
             if ch == "*":
@@ -242,6 +279,13 @@ class _Parser:
             raise Unsupported(f"invalid repetition bounds {{{low},{high}}}")
         return low, high
 
+    def parse_complement(self) -> Node:
+        """dk.brics `~`, which binds tighter than concatenation."""
+        if self.brics and self.peek() == "~":
+            self.eat()
+            return Complement(self.parse_complement())
+        return self.parse_atom()
+
     def parse_atom(self) -> Node:
         ch = self.eat()
 
@@ -253,6 +297,14 @@ class _Parser:
             return CharSet(frozenset("\n"), negated=True)
         if ch == "\\":
             return self._escape()
+        if self.brics and ch == "@":
+            return Repeat(any_char(), 0, None)  # brics: any string at all
+        if self.brics and ch == "#":
+            return CharSet(frozenset())  # brics: the empty language
+        if ch in "^$" and self.brics:
+            # dk.brics has no anchors; these are ordinary characters there.
+            self.literals.add(ch)
+            return CharSet(frozenset(ch))
         if ch in "^$":
             # Redundant at the ends under full-match semantics; meaningful
             # anywhere else, which this parser cannot express.

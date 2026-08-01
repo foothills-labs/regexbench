@@ -18,7 +18,7 @@ import re
 
 import pytest
 
-from regexbench import Semantics, Verdict, equivalent
+from regexbench import Dialect, Semantics, Verdict, equivalent
 
 ATOMS = ["a", "b", "c", "[ab]", "[^a]", r"\d", ".", "a|b", "(ab)", "[a-c]"]
 QUANTIFIERS = ["", "*", "+", "?", "{2}", "{1,2}"]
@@ -134,6 +134,60 @@ def test_search_verdicts_agree_with_re_search(seed: int) -> None:
             ), (
                 f"claimed searching {left!r} != {right!r} with witness "
                 f"{witness!r}, but re says they agree on it"
+            )
+
+    assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
+
+
+@pytest.mark.parametrize("operator", ["&", "~"])
+@pytest.mark.parametrize("seed", range(3))
+def test_brics_operators_agree_with_re(operator: str, seed: int) -> None:
+    """`&` and `~` have no `re` equivalent, but their operands do.
+
+    So the ground truth is computed per operand — a string is in `(A)&(B)`
+    exactly when `re` full-matches it against both, and in `~(A)` exactly when
+    `re` does not match it at all — and the verdict is checked against that.
+    """
+    rng = random.Random(seed)
+    checked = 0
+
+    for _ in range(120):
+        inner, other, candidate = (_random_pattern(rng) for _ in range(3))
+        try:
+            compiled_inner = re.compile(inner)
+            compiled_other = re.compile(other)
+            compiled_candidate = re.compile(candidate)
+        except re.error:
+            continue
+
+        pattern = f"({inner})&({other})" if operator == "&" else f"~({inner})"
+
+        def in_pattern(
+            text: str,
+            first: re.Pattern[str] = compiled_inner,
+            second: re.Pattern[str] = compiled_other,
+            op: str = operator,
+        ) -> bool:
+            if op == "&":
+                return bool(first.fullmatch(text)) and bool(second.fullmatch(text))
+            return not first.fullmatch(text)
+
+        result = equivalent(pattern, candidate, dialect=Dialect.BRICS)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+
+        if result.verdict is Verdict.EQUIVALENT:
+            for text in CORPUS:
+                assert in_pattern(text) == bool(compiled_candidate.fullmatch(text)), (
+                    f"claimed {pattern!r} == {candidate!r}, but they differ on {text!r}"
+                )
+        else:
+            witness = result.witness
+            assert witness is not None
+            assert in_pattern(witness) != bool(compiled_candidate.fullmatch(witness)), (
+                f"claimed {pattern!r} != {candidate!r} with witness {witness!r}, "
+                f"but re says they agree on it"
             )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
