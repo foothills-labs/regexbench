@@ -113,6 +113,13 @@ class Task:
     pattern, or both. KB13 and NL-RX ship a gold pattern and no examples at
     all, so an example-free task is legitimate and scored by equivalence
     alone.
+
+    `semantics` and `dialect` describe the problem, not just the reference:
+    a candidate is read in the same dialect and matched under the same
+    semantics as the pattern it is being compared against. Scoring a candidate
+    against a BRICS task means claiming the candidate is BRICS too — which is
+    the right claim when a model was asked to answer in that corpus's own
+    notation, and the wrong one otherwise.
     """
 
     positives: list[str] = field(default_factory=list)
