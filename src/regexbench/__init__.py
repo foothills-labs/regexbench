@@ -22,6 +22,7 @@ from .execute import MatchTimeout, safe_fullmatch, safe_search
 from .safety import attack_strings, screen
 from .types import (
     CorrectnessResult,
+    Dialect,
     EquivalenceResult,
     Report,
     Risk,
@@ -35,6 +36,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "CorrectnessResult",
+    "Dialect",
     "EquivalenceResult",
     "MatchTimeout",
     "NonRegular",

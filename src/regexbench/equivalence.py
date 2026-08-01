@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from ._automata import build_dfa, find_distinguishing_string
 from ._parse import OTHER, NonRegular, Unsupported, parse
-from .types import EquivalenceResult, Semantics, Verdict
+from .types import Dialect, EquivalenceResult, Semantics, Verdict
 
 __all__ = ["equivalent", "is_regular"]
 
@@ -26,6 +26,7 @@ def equivalent(
     right: str,
     *,
     semantics: Semantics = Semantics.FULLMATCH,
+    dialect: Dialect = Dialect.PYTHON,
 ) -> EquivalenceResult:
     """Decide whether `left` and `right` match exactly the same strings.
 
@@ -38,14 +39,14 @@ def equivalent(
     still a real string, now one that one pattern finds and the other does not.
     """
     try:
-        left_ast, left_chars = parse(left, semantics=semantics)
+        left_ast, left_chars = parse(left, semantics=semantics, dialect=dialect)
     except NonRegular as exc:
         return EquivalenceResult(Verdict.UNDECIDABLE, reason=f"left pattern: {exc}")
     except Unsupported as exc:
         return EquivalenceResult(Verdict.UNSUPPORTED, reason=f"left pattern: {exc}")
 
     try:
-        right_ast, right_chars = parse(right, semantics=semantics)
+        right_ast, right_chars = parse(right, semantics=semantics, dialect=dialect)
     except NonRegular as exc:
         return EquivalenceResult(Verdict.UNDECIDABLE, reason=f"right pattern: {exc}")
     except Unsupported as exc:
@@ -75,14 +76,14 @@ def equivalent(
     )
 
 
-def is_regular(pattern: str) -> bool:
+def is_regular(pattern: str, *, dialect: Dialect = Dialect.PYTHON) -> bool:
     """Whether `pattern` stays inside the regular languages.
 
     False means equivalence checking cannot apply — fall back to
     example-based evaluation.
     """
     try:
-        parse(pattern)
+        parse(pattern, dialect=dialect)
     except NonRegular:
         return False
     except Unsupported:
