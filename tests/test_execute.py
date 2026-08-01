@@ -96,3 +96,21 @@ def test_match_many_uses_one_process_for_a_well_behaved_batch():
 
 def test_match_many_accepts_an_empty_batch():
     assert match_many(r"\d+", []) == []
+
+
+def test_a_batch_that_hangs_everywhere_stays_linear():
+    """Regression: the budget is per text, not per batch.
+
+    Budgeting the whole batch at timeout x len(texts) makes a pattern that
+    hangs on every string quadratic — each retry after a kill starts a
+    slightly shorter batch that also hangs and also waits out its whole
+    budget. Six strings at 0.3s cost about 1.8s linear and about 6.3s
+    quadratic.
+    """
+    attacks = ["a" * 40 + "!"] * 6
+    start = time.time()
+    outcomes = match_many(CATASTROPHIC, attacks, timeout=0.3)
+    elapsed = time.time() - start
+
+    assert outcomes == [None] * 6
+    assert elapsed < 4.0, f"took {elapsed:.1f}s — the budget is scaling with the batch"

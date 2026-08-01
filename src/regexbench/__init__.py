@@ -13,6 +13,18 @@ comparison can tell you:
 
 Built for scoring models that write regex, where exact-match against a
 reference is the wrong metric and unsafe output is a real cost.
+
+To score a model rather than a pattern, load a benchmark and run the whole
+thing:
+
+    >>> from regexbench import run                      # doctest: +SKIP
+    >>> from regexbench.datasets import load_regexeval   # doctest: +SKIP
+    >>> tasks = load_regexeval("RegexEval.json")         # doctest: +SKIP
+    >>> print(run(tasks, predictions).table())           # doctest: +SKIP
+
+`regexbench.datasets` carries the corpora this literature reports on, each
+loaded with the match semantics and syntax dialect it actually uses, so a
+number produced here can be put next to a published one.
 """
 
 from ._parse import NonRegular, Unsupported
