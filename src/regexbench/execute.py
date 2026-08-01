@@ -22,9 +22,11 @@ model output, user input, anything generated. For patterns you wrote, use
 from __future__ import annotations
 
 import json
+import queue
 import re
 import subprocess
 import sys
+import threading
 
 __all__ = ["safe_fullmatch", "safe_search", "match_many", "MatchTimeout"]
 
@@ -59,40 +61,80 @@ class MatchTimeout(TimeoutError):
 
 
 def _run_batch(
-    pattern: str, texts: list[str], method: str, budget: float
+    pattern: str, texts: list[str], method: str, timeout: float
 ) -> tuple[dict[int, bool], bool]:
-    """Match every text in one child process. Returns (results, ran_out_of_time)."""
+    """Match every text in one child process. Returns (results, ran_out_of_time).
+
+    The budget is per text and enforced as *silence*: results stream back one
+    line at a time, and going `timeout` seconds without a new line means the
+    text currently being matched is stuck. Budgeting the batch as a whole
+    instead — timeout times the number of texts — would let a pattern that
+    hangs on everything burn a quadratic amount of wall clock, since each
+    retry after a kill starts a slightly shorter batch that also hangs.
+    """
     process = subprocess.Popen(
         [sys.executable, "-c", _CHILD],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         text=True,
     )
-    request = json.dumps({"pattern": pattern, "method": method, "texts": texts})
 
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def drain() -> None:
+        for line in process.stdout:  # type: ignore[union-attr]
+            lines.put(line)
+        lines.put(None)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+
+    # The child reads stdin to EOF before matching anything, so this cannot
+    # deadlock against its output.
+    request = json.dumps({"pattern": pattern, "method": method, "texts": texts})
     try:
-        out, _ = process.communicate(request, timeout=budget)
-        exhausted = False
-    except subprocess.TimeoutExpired:
-        process.kill()
-        # Draining after the kill yields everything written before it, which
-        # is how a partial batch survives its own timeout.
-        out, _ = process.communicate()
-        exhausted = True
+        process.stdin.write(request)  # type: ignore[union-attr]
+        process.stdin.close()  # type: ignore[union-attr]
+    except BrokenPipeError:  # pragma: no cover - child died before reading
+        pass
 
     results: dict[int, bool] = {}
-    for line in out.splitlines():
-        if not line.strip():
-            continue
+    failure: str | None = None
+    exhausted = False
+    died = False
+
+    while len(results) < len(texts):
+        try:
+            line = lines.get(timeout=timeout)
+        except queue.Empty:
+            exhausted = True
+            break
+        if line is None:  # the child exited
+            died = True
+            break
         try:
             message = json.loads(line)
         except json.JSONDecodeError:  # pragma: no cover - child emits JSON only
             continue
         if "error" in message:
-            raise re.error(message["error"])
+            failure = message["error"]
+            break
         results[message["index"]] = message["matched"]
 
+    if process.poll() is None:
+        process.kill()
+    process.wait()
+
+    if failure is not None:
+        raise re.error(failure)
+    if died and len(results) < len(texts):
+        # A child that exits early without saying why is a real anomaly, not a
+        # set of failed examples. Reporting it as the latter would quietly
+        # turn a crash into a score.
+        raise RuntimeError(
+            f"match worker exited after {len(results)} of {len(texts)} results"
+        )
     return results, exhausted
 
 
@@ -117,7 +159,7 @@ def match_many(
 
     while pending:
         batch = [texts[index] for index in pending]
-        results, exhausted = _run_batch(pattern, batch, method, timeout * len(batch))
+        results, exhausted = _run_batch(pattern, batch, method, timeout)
         for offset, matched in results.items():
             outcomes[pending[offset]] = matched
         if not exhausted:

@@ -145,12 +145,22 @@ class Report:
     def usable(self) -> bool:
         """Right, and not a ReDoS liability.
 
-        "Right" means every example passes. When the task carries no examples
-        — the equivalence-only corpora — it means matching the reference
-        language instead. A pattern with neither signal is not usable, because
-        nothing established that it works.
+        The strongest available evidence wins, and a proven difference is
+        stronger than a passing example. `#[0-9a-f]{6}` passes a hex-colour
+        task whose examples happen to be lowercase, and is still the wrong
+        pattern — equivalence says so, and it is not overruled by examples
+        that did not happen to ask. Treating a handful of examples as the last
+        word is the failure mode this package exists to avoid.
+
+        So: never vulnerable, never proven DIFFERENT from the reference, and
+        then perfect on whatever examples exist. UNSUPPORTED and UNDECIDABLE
+        do not count against a pattern — they mean the engine could not
+        answer, not that the pattern is wrong — but with no examples to fall
+        back on they leave nothing establishing that it works.
         """
         if self.safety.risk.is_vulnerable:
+            return False
+        if self.equivalence is not None and self.equivalence.verdict is Verdict.DIFFERENT:
             return False
         if self.correctness.total:
             return self.correctness.perfect

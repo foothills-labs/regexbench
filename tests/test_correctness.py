@@ -64,3 +64,34 @@ def test_correct_but_dangerous_pattern_is_not_usable():
     assert report.correctness.perfect
     assert report.safety.risk.is_vulnerable
     assert not report.usable, "a correct pattern that can hang is still not shippable"
+
+
+def test_examples_do_not_overrule_a_proven_difference():
+    """The failure mode this package exists to catch.
+
+    `#[0-9a-f]{6}` rejects uppercase hex, so it is the wrong pattern — but the
+    task's examples happen to be lowercase, so every one of them passes. The
+    reference settles it, and a couple of examples that did not happen to ask
+    must not overrule that.
+    """
+    task = Task(
+        positives=["#a1b2c3"],
+        negatives=["#xyz"],
+        reference=r"#[0-9a-fA-F]{6}",
+    )
+    report = evaluate(r"#[0-9a-f]{6}", task)
+
+    assert report.correctness.perfect, "it does pass every example it was given"
+    assert report.equivalence.verdict is Verdict.DIFFERENT
+    assert not report.usable
+    assert report.equivalence.witness is not None
+
+
+def test_an_undecidable_comparison_does_not_condemn_a_passing_pattern():
+    """UNSUPPORTED means the engine could not answer, not that the answer is no."""
+    task = Task(positives=["ab"], negatives=["ba"], reference=r"(?=a)ab")
+    report = evaluate("ab", task)
+
+    assert report.equivalence.verdict is Verdict.UNDECIDABLE
+    assert report.correctness.perfect
+    assert report.usable, "examples are the evidence left when equivalence cannot answer"
