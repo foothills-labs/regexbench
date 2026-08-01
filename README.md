@@ -76,7 +76,7 @@ from regexbench import Dialect, equivalent
 equivalent("(a)&(b)", r"a\&b").verdict                        # EQUIVALENT
 equivalent("(a)&(b)", r"a\&b", dialect=Dialect.BRICS).verdict # DIFFERENT
 
-equivalent("([0-9])&([0-4])", "[0-4]", dialect=Dialect.BRICS) # EQUIVALENT
+equivalent("([0-9])&([0-4])", "[0-4]", dialect=Dialect.BRICS).verdict  # EQUIVALENT
 ```
 
 `&` appears in 22.8% of KB13 and 27.3% of NL-RX, `~` in 7.6% and 17.2%. The

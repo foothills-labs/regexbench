@@ -143,8 +143,15 @@ any model could score.
 over the full corpus rather than an average over the analyzable subset. The
 `undecided` count in the report is the difference between the two readings.
 
-`exact` is reported for contrast. The gap between `exact` and `dfa-eq` is the
-share of answers that are right and would be marked wrong by string comparison.
+`exact` is reported for contrast: where equivalence is decidable, `dfa-eq`
+above `exact` is the share of answers that are right and would be marked wrong
+by string comparison.
+
+`exact` can also come out *above* `dfa-eq`, and that is not a contradiction. An
+exactly-correct answer to an undecidable task still counts as undecided, so it
+scores for `exact` and not for `dfa-eq`. When you see that, read it as the
+undecidable share being larger than the semantic-credit share — check
+`undecided` — rather than as string comparison outperforming automata.
 
 ## Performance
 
