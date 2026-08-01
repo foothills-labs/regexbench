@@ -38,6 +38,16 @@ def equivalent(
     corpora like Re(gEx|DoS)Eval whose references are unanchored. A witness is
     still a real string, now one that one pattern finds and the other does not.
     """
+    if left == right:
+        # Reflexivity needs no automaton. A pattern's language is a function of
+        # its text, so identical text denotes identical languages under any
+        # dialect and either semantics — including for backreferences and
+        # lookaround, where nothing else here can reach a verdict. The reference
+        # tooling in this field does the same: Re(gEx|DoS)Eval's DFA_Equ
+        # evaluation returns true on string equality before invoking
+        # regex_dfa_equals.jar at all, so matching that keeps scores comparable.
+        return EquivalenceResult(Verdict.EQUIVALENT, reason="identical patterns")
+
     try:
         left_ast, left_chars = parse(left, semantics=semantics, dialect=dialect)
     except NonRegular as exc:
