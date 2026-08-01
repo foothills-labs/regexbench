@@ -21,6 +21,20 @@ class Verdict(enum.Enum):
     UNSUPPORTED = "unsupported"
 
 
+class Semantics(enum.Enum):
+    """What it means for a pattern to "match" a string.
+
+    Benchmarks disagree on this, and getting it wrong silently invalidates
+    every score. Re(gEx|DoS)Eval expects ``re.search`` — its reference
+    patterns pass 100% of their own tests under SEARCH and only 94% under
+    FULLMATCH. The KB13 and NL-RX corpora are anchored line matchers and want
+    FULLMATCH.
+    """
+
+    FULLMATCH = "fullmatch"
+    SEARCH = "search"
+
+
 class Risk(enum.Enum):
     """ReDoS exposure."""
 
@@ -75,17 +89,28 @@ class CorrectnessResult:
 
 @dataclass(frozen=True)
 class Task:
-    """One regex problem: what to match, and what not to."""
+    """One regex problem: what to match, and what not to.
 
-    positives: list[str]
-    negatives: list[str]
+    A task needs *something* to score against — worked examples, a reference
+    pattern, or both. KB13 and NL-RX ship a gold pattern and no examples at
+    all, so an example-free task is legitimate and scored by equivalence
+    alone.
+    """
+
+    positives: list[str] = field(default_factory=list)
+    negatives: list[str] = field(default_factory=list)
     prompt: str = ""
     reference: str | None = None
     name: str = ""
+    semantics: Semantics = Semantics.FULLMATCH
 
     def __post_init__(self) -> None:
-        if not self.positives and not self.negatives:
-            raise ValueError("a task needs at least one positive or negative example")
+        if not self.positives and not self.negatives and self.reference is None:
+            raise ValueError("a task needs at least one example or a reference pattern")
+
+    @property
+    def has_examples(self) -> bool:
+        return bool(self.positives or self.negatives)
 
 
 @dataclass(frozen=True)
@@ -99,5 +124,17 @@ class Report:
 
     @property
     def usable(self) -> bool:
-        """Correct on every example and not a ReDoS liability."""
-        return self.correctness.perfect and not self.safety.risk.is_vulnerable
+        """Right, and not a ReDoS liability.
+
+        "Right" means every example passes. When the task carries no examples
+        — the equivalence-only corpora — it means matching the reference
+        language instead. A pattern with neither signal is not usable, because
+        nothing established that it works.
+        """
+        if self.safety.risk.is_vulnerable:
+            return False
+        if self.correctness.total:
+            return self.correctness.perfect
+        if self.equivalence is not None:
+            return self.equivalence.verdict is Verdict.EQUIVALENT
+        return False

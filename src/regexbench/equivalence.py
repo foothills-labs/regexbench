@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from ._automata import build_dfa, find_distinguishing_string
 from ._parse import OTHER, NonRegular, Unsupported, parse
-from .types import EquivalenceResult, Verdict
+from .types import EquivalenceResult, Semantics, Verdict
 
 __all__ = ["equivalent", "is_regular"]
 
@@ -21,21 +21,31 @@ __all__ = ["equivalent", "is_regular"]
 _FILLERS = "\x01abcxyz0123456789 !~"
 
 
-def equivalent(left: str, right: str) -> EquivalenceResult:
+def equivalent(
+    left: str,
+    right: str,
+    *,
+    semantics: Semantics = Semantics.FULLMATCH,
+) -> EquivalenceResult:
     """Decide whether `left` and `right` match exactly the same strings.
 
     Returns UNDECIDABLE — not a guess — when either pattern uses
     backreferences or lookaround, which put it outside the regular languages.
+
+    Under SEARCH semantics the question becomes "do these two patterns accept
+    the same *subject strings* when searched", which is the right question for
+    corpora like Re(gEx|DoS)Eval whose references are unanchored. A witness is
+    still a real string, now one that one pattern finds and the other does not.
     """
     try:
-        left_ast, left_chars = parse(left)
+        left_ast, left_chars = parse(left, semantics=semantics)
     except NonRegular as exc:
         return EquivalenceResult(Verdict.UNDECIDABLE, reason=f"left pattern: {exc}")
     except Unsupported as exc:
         return EquivalenceResult(Verdict.UNSUPPORTED, reason=f"left pattern: {exc}")
 
     try:
-        right_ast, right_chars = parse(right)
+        right_ast, right_chars = parse(right, semantics=semantics)
     except NonRegular as exc:
         return EquivalenceResult(Verdict.UNDECIDABLE, reason=f"right pattern: {exc}")
     except Unsupported as exc:
