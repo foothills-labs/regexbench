@@ -176,24 +176,29 @@ print(report.table(ks=(1, 5)))
 ```
 my-model
 762 tasks, 762 answered
-  pass@1        100.0%
-  dfa-eq@1       77.4%
-  exact@1       100.0%
-  usable@1       85.8%
-  vulnerable@1   14.2%  (lower is better)
-  172 task(s) undecidable — counted against dfa-eq
+  pass@1               99.9%
+  dfa-eq@1             77.4%  (whole corpus — a lower bound)
+  dfa-eq@1 (decided)  100.0%  (engine limits excluded — model only)
+  exact@1             100.0%
+  usable@1             85.8%
+  vulnerable@1         14.2%  (lower is better)
+  172 task(s) undecidable — counted against dfa-eq, excluded from dfa-eq (decided)
 ```
 
 `predictions` is a mapping from task name to the pattern, or to a list of
 sampled patterns, or a sequence aligned with the tasks. All metrics use the
 unbiased pass@k estimator, so they line up with published numbers.
 
-Two things are deliberately not smoothed over. **A metric no task can answer is
-`None`, not zero** — KB13 ships no examples, and a 0% pass@1 would read as a
-model failing a question nobody asked it. **An undecidable comparison counts
-against `dfa-eq`**, making it a lower bound over the whole corpus rather than
-an average over the analyzable subset, with `undecided` reporting the size of
-that gap.
+**A metric no task can answer is `None`, not zero** — KB13 ships no examples,
+and a 0% pass@1 would read as a model failing a question nobody asked it.
+
+**`dfa-eq` is reported twice**, because one number cannot answer both honest
+questions. The plain figure counts undecidable comparisons as failures: how
+much of the corpus was *verified* correct, a lower bound that cannot flatter.
+The `(decided)` figure drops those tasks from the denominator: how much of what
+could be checked was correct, the model alone. On KB13 the gold answers
+themselves score 51.1% and 100.0% — a 49-point spread that is not a model
+result at all, but the `\b` gap in this engine.
 
 ## CLI
 

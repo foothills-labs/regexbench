@@ -44,12 +44,25 @@ Scoring the corpus against itself — `--use-reference` — gives:
 
 | Metric | Value | What it means |
 | --- | --- | --- |
-| `pass@1` | 100.0% | every reference passes its own tests, so the corpus is loaded correctly |
+| `pass@1` | 99.9–100% | the references pass their own tests, so the corpus is loaded correctly |
 | `dfa-eq@1` | 77.4% | the engine's ceiling: 172 tasks are undecidable, mostly lookaround and `\b` |
+| `dfa-eq@1 (decided)` | 100.0% | of what could be checked, the gold answers are of course all correct |
 | `vulnerable@1` | 14.2% | 108 of the corpus's own reference expressions are ReDoS-vulnerable |
 
-That last row is a property of the dataset, not of this tool, and is roughly
-the point the paper is making.
+`pass@1` moves between 99.9% and 100% run to run, and the cause is not the
+loader. One record, `regexeval/1660`, has a gold reference that is itself a
+ReDoS pattern — `^((\.)?([a-zA-Z0-9_-]?)(\.)?([a-zA-Z0-9_-]?)(\.)?)+$` — and it
+backtracks on its own non-matching example `'.....444fef454#'` for long enough
+to trip the one-second budget on a loaded machine. A timeout on a negative
+example counts as a false positive, so that single task drops in and out.
+
+The distinction matters when you use `pass@1` as a load check: a *wholesale*
+drop, to around 94%, means the semantics are wrong. A wobble of one or two
+tasks means a vulnerable gold pattern raced the timeout.
+
+The `vulnerable@1` row is a property of the dataset rather than of this tool,
+and is roughly the point the paper is making — `regexeval/1660` above is one of
+the 108.
 
 ---
 
@@ -136,12 +149,23 @@ unrecognised field is an error rather than a typo you find out about later.
 
 `--use-reference` first, always. It costs one run and tells you whether the
 corpus is loaded correctly and what ceiling the engine puts on it. A `pass@1`
-under 100% means the semantics are wrong; the `dfa-eq@1` it reports is the most
-any model could score.
+far under 100% means the semantics are wrong; the `dfa-eq@1` it reports is the
+most any model could score.
 
-`dfa-eq` counts undecidable comparisons as failures, so it is a lower bound
-over the full corpus rather than an average over the analyzable subset. The
-`undecided` count in the report is the difference between the two readings.
+`dfa-eq` is reported twice, because there are two honest questions and one
+number cannot answer both:
+
+* **`dfa-eq@k`** counts undecidable comparisons as failures. "How much of this
+  corpus did we verify as correct" — a lower bound that cannot flatter, and the
+  one to quote.
+* **`dfa-eq@k (decided)`** drops undecidable tasks from the denominator. "Of
+  what we could check, how much was correct" — the model on its own, blind to
+  engine coverage.
+
+On KB13 the gold answers themselves score 51.1% by the first reading and 100.0%
+by the second. That 49-point spread is not a model result at all; it is `\b`.
+Watch both, and treat a gap between them as a statement about this engine
+rather than about whatever you are scoring.
 
 `exact` is reported for contrast: where equivalence is decidable, `dfa-eq`
 above `exact` is the share of answers that are right and would be marked wrong
