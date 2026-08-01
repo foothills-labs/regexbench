@@ -1,0 +1,308 @@
+"""A parser for the genuinely regular subset of regex syntax.
+
+Equivalence checking works by compiling to finite automata, which is only
+possible for patterns that describe regular languages. Anything outside that
+subset — backreferences, lookaround, recursion — is rejected here rather than
+silently mishandled downstream.
+
+Supported: literals, escapes, ``.``, character classes with ranges and
+negation, ``*`` ``+`` ``?`` and ``{m,n}`` repetition, alternation, and
+grouping (capturing or not). Anchors are accepted only at the ends, since
+equivalence is defined over full matches.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+__all__ = ["parse", "Unsupported", "NonRegular", "Node"]
+
+# Sentinel standing for "any character not named anywhere in the patterns".
+OTHER = "\x00OTHER"
+
+_DIGITS = frozenset("0123456789")
+_WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+_SPACE = frozenset(" \t\n\r\f\v")
+
+_CLASS_ESCAPES: dict[str, tuple[frozenset[str], bool]] = {
+    "d": (_DIGITS, False),
+    "D": (_DIGITS, True),
+    "w": (_WORD, False),
+    "W": (_WORD, True),
+    "s": (_SPACE, False),
+    "S": (_SPACE, True),
+}
+
+_LITERAL_ESCAPES = {
+    "n": "\n", "t": "\t", "r": "\r", "f": "\f", "v": "\v", "0": "\0",
+}
+
+
+class Unsupported(ValueError):
+    """The pattern uses syntax this parser does not implement."""
+
+
+class NonRegular(Unsupported):
+    """The pattern is not a regular language, so automata cannot represent it."""
+
+
+class Node:
+    pass
+
+
+@dataclass(frozen=True)
+class Empty(Node):
+    """Matches the empty string."""
+
+
+@dataclass(frozen=True)
+class CharSet(Node):
+    """A set of characters, possibly negated.
+
+    Negation is kept symbolic rather than expanded, so the set stays finite
+    regardless of how large the real alphabet is.
+    """
+
+    chars: frozenset[str]
+    negated: bool = False
+
+    def accepts(self, symbol: str) -> bool:
+        if symbol == OTHER:
+            # OTHER stands for unnamed characters, so a positive set never
+            # contains it and a negated set always does.
+            return self.negated
+        return (symbol in self.chars) != self.negated
+
+
+@dataclass(frozen=True)
+class Concat(Node):
+    parts: tuple[Node, ...]
+
+
+@dataclass(frozen=True)
+class Alternate(Node):
+    options: tuple[Node, ...]
+
+
+@dataclass(frozen=True)
+class Repeat(Node):
+    node: Node
+    minimum: int
+    maximum: int | None  # None means unbounded
+
+
+def parse(pattern: str) -> tuple[Node, frozenset[str]]:
+    """Parse `pattern`, returning its AST and every literal character in it."""
+    parser = _Parser(pattern)
+    node = parser.parse_alternation()
+    if parser.pos != len(parser.src):
+        raise Unsupported(f"unexpected {parser.peek()!r} at position {parser.pos}")
+    return node, frozenset(parser.literals)
+
+
+class _Parser:
+    def __init__(self, src: str) -> None:
+        self.src = src
+        self.pos = 0
+        self.literals: set[str] = set()
+
+    def peek(self) -> str | None:
+        return self.src[self.pos] if self.pos < len(self.src) else None
+
+    def eat(self) -> str:
+        ch = self.src[self.pos]
+        self.pos += 1
+        return ch
+
+    def parse_alternation(self) -> Node:
+        options = [self.parse_concat()]
+        while self.peek() == "|":
+            self.eat()
+            options.append(self.parse_concat())
+        return options[0] if len(options) == 1 else Alternate(tuple(options))
+
+    def parse_concat(self) -> Node:
+        parts: list[Node] = []
+        while True:
+            ch = self.peek()
+            if ch is None or ch in "|)":
+                break
+            parts.append(self.parse_repeat())
+        if not parts:
+            return Empty()
+        return parts[0] if len(parts) == 1 else Concat(tuple(parts))
+
+    def parse_repeat(self) -> Node:
+        node = self.parse_atom()
+        while True:
+            ch = self.peek()
+            if ch == "*":
+                self.eat()
+                node = Repeat(node, 0, None)
+            elif ch == "+":
+                self.eat()
+                node = Repeat(node, 1, None)
+            elif ch == "?":
+                self.eat()
+                node = Repeat(node, 0, 1)
+            elif ch == "{":
+                bounds = self._try_bounds()
+                if bounds is None:
+                    break
+                node = Repeat(node, bounds[0], bounds[1])
+            else:
+                break
+
+            # Possessive quantifiers and lazy modifiers change matching
+            # strategy, not the language — but only for lazy. Possessive
+            # genuinely changes it, so refuse both rather than guess.
+            if self.peek() in {"+", "?"} and isinstance(node, Repeat):
+                nxt = self.peek()
+                if nxt == "+":
+                    raise NonRegular("possessive quantifiers are not supported")
+                self.eat()  # lazy: same language, different match choice
+        return node
+
+    def _try_bounds(self) -> tuple[int, int | None] | None:
+        start = self.pos
+        self.eat()  # {
+        digits = ""
+        while self.peek() is not None and self.peek().isdigit():
+            digits += self.eat()
+        if not digits:
+            self.pos = start
+            return None
+        low = int(digits)
+        if self.peek() == "}":
+            self.eat()
+            return low, low
+        if self.peek() != ",":
+            self.pos = start
+            return None
+        self.eat()
+        upper = ""
+        while self.peek() is not None and self.peek().isdigit():
+            upper += self.eat()
+        if self.peek() != "}":
+            self.pos = start
+            return None
+        self.eat()
+        high = int(upper) if upper else None
+        if high is not None and high < low:
+            raise Unsupported(f"invalid repetition bounds {{{low},{high}}}")
+        return low, high
+
+    def parse_atom(self) -> Node:
+        ch = self.eat()
+
+        if ch == "(":
+            return self._group()
+        if ch == "[":
+            return self._char_class()
+        if ch == ".":
+            return CharSet(frozenset("\n"), negated=True)
+        if ch == "\\":
+            return self._escape()
+        if ch in "^$":
+            # Redundant at the ends under full-match semantics; meaningful
+            # anywhere else, which this parser cannot express.
+            if self.pos == 1 or self.pos == len(self.src):
+                return Empty()
+            raise Unsupported(f"anchor {ch!r} is only supported at the pattern ends")
+        if ch in "*+?":
+            raise Unsupported(f"nothing to repeat at position {self.pos - 1}")
+
+        self.literals.add(ch)
+        return CharSet(frozenset(ch))
+
+    def _group(self) -> Node:
+        if self.src.startswith("?", self.pos):
+            rest = self.src[self.pos:]
+            if rest.startswith("?:"):
+                self.pos += 2
+            elif rest.startswith(("?=", "?!", "?<=", "?<!")):
+                raise NonRegular("lookaround makes equivalence undecidable")
+            elif rest.startswith("?>"):
+                raise NonRegular("atomic groups are not supported")
+            elif rest.startswith("?P<") or rest.startswith("?<"):
+                close = self.src.find(">", self.pos)
+                if close == -1:
+                    raise Unsupported("unterminated named group")
+                self.pos = close + 1
+            else:
+                raise Unsupported(f"unsupported group syntax at position {self.pos}")
+        node = self.parse_alternation()
+        if self.peek() != ")":
+            raise Unsupported("unbalanced parenthesis")
+        self.eat()
+        return node
+
+    def _escape(self) -> Node:
+        if self.pos >= len(self.src):
+            raise Unsupported("pattern ends with a backslash")
+        ch = self.eat()
+
+        if ch.isdigit() and ch != "0":
+            raise NonRegular("backreferences make the language non-regular")
+        if ch in {"b", "B", "A", "Z", "z", "G"}:
+            raise Unsupported(f"anchor escape \\{ch} is not supported")
+        if ch in _CLASS_ESCAPES:
+            chars, negated = _CLASS_ESCAPES[ch]
+            self.literals.update(chars)
+            return CharSet(chars, negated=negated)
+        literal = _LITERAL_ESCAPES.get(ch, ch)
+        self.literals.add(literal)
+        return CharSet(frozenset(literal))
+
+    def _char_class(self) -> Node:
+        negated = False
+        if self.peek() == "^":
+            self.eat()
+            negated = True
+
+        chars: set[str] = set()
+        first = True
+        while True:
+            ch = self.peek()
+            if ch is None:
+                raise Unsupported("unterminated character class")
+            if ch == "]" and not first:
+                self.eat()
+                break
+            first = False
+            ch = self.eat()
+
+            if ch == "\\":
+                if self.pos >= len(self.src):
+                    raise Unsupported("character class ends with a backslash")
+                esc = self.eat()
+                if esc in _CLASS_ESCAPES:
+                    sub, sub_negated = _CLASS_ESCAPES[esc]
+                    if sub_negated:
+                        raise Unsupported(
+                            f"negated class escape \\{esc} inside [...] is not supported"
+                        )
+                    chars.update(sub)
+                    continue
+                ch = _LITERAL_ESCAPES.get(esc, esc)
+
+            is_range = (
+                self.peek() == "-"
+                and self.pos + 1 < len(self.src)
+                and self.src[self.pos + 1] != "]"
+            )
+            if is_range:
+                self.eat()
+                end = self.eat()
+                if end == "\\":
+                    end = _LITERAL_ESCAPES.get(self.eat(), self.src[self.pos - 1])
+                if ord(end) < ord(ch):
+                    raise Unsupported(f"reversed range {ch}-{end}")
+                if ord(end) - ord(ch) > 0x10000:
+                    raise Unsupported("character range is too large to enumerate")
+                chars.update(chr(c) for c in range(ord(ch), ord(end) + 1))
+            else:
+                chars.add(ch)
+
+        self.literals.update(chars)
+        return CharSet(frozenset(chars), negated=negated)
