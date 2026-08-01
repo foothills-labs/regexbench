@@ -26,6 +26,7 @@ from .types import (
     Report,
     Risk,
     SafetyResult,
+    Semantics,
     Task,
     Verdict,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "Report",
     "Risk",
     "SafetyResult",
+    "Semantics",
     "Task",
     "Unsupported",
     "Verdict",

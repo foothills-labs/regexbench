@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .types import Semantics
+
 __all__ = ["parse", "Unsupported", "NonRegular", "Node"]
 
 # Sentinel standing for "any character not named anywhere in the patterns".
@@ -91,13 +93,57 @@ class Repeat(Node):
     maximum: int | None  # None means unbounded
 
 
-def parse(pattern: str) -> tuple[Node, frozenset[str]]:
-    """Parse `pattern`, returning its AST and every literal character in it."""
+def parse(
+    pattern: str,
+    *,
+    semantics: Semantics = Semantics.FULLMATCH,
+) -> tuple[Node, frozenset[str]]:
+    """Parse `pattern`, returning its AST and every literal character in it.
+
+    Under SEARCH semantics the pattern is rewritten to the full-match pattern
+    describing the same set of subject strings: ``p`` becomes ``.*p.*``, minus
+    the wildcard on whichever end the pattern already anchors. Everything
+    downstream then works in full-match terms only, so there is exactly one
+    notion of equivalence in the automata layer.
+    """
     parser = _Parser(pattern)
     node = parser.parse_alternation()
     if parser.pos != len(parser.src):
         raise Unsupported(f"unexpected {parser.peek()!r} at position {parser.pos}")
+    if semantics is Semantics.SEARCH:
+        node = _widen_for_search(node, parser.anchored_start, parser.anchored_end)
     return node, frozenset(parser.literals)
+
+
+def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> Node:
+    """Wrap `node` so full-matching it is the same as searching the original."""
+    any_run = Repeat(CharSet(frozenset("\n"), negated=True), 0, None)
+
+    def wrap(inner: Node, prefix: bool, suffix: bool) -> Node:
+        parts: list[Node] = []
+        if prefix:
+            parts.append(any_run)
+        parts.append(inner)
+        if suffix:
+            parts.append(any_run)
+        return parts[0] if len(parts) == 1 else Concat(tuple(parts))
+
+    if isinstance(node, Alternate):
+        # A leading ^ anchors only the first branch and a trailing $ only the
+        # last: in `a|b$` the anchor says nothing about `a`. So the wildcards
+        # distribute over the branches instead of wrapping the alternation.
+        last = len(node.options) - 1
+        return Alternate(
+            tuple(
+                wrap(
+                    option,
+                    not (anchored_start and index == 0),
+                    not (anchored_end and index == last),
+                )
+                for index, option in enumerate(node.options)
+            )
+        )
+    return wrap(node, not anchored_start, not anchored_end)
 
 
 class _Parser:
@@ -105,6 +151,10 @@ class _Parser:
         self.src = src
         self.pos = 0
         self.literals: set[str] = set()
+        # Recorded rather than inferred later: the parser folds end anchors
+        # into Empty(), so by the time there is an AST the anchor is gone.
+        self.anchored_start = False
+        self.anchored_end = False
 
     def peek(self) -> str | None:
         return self.src[self.pos] if self.pos < len(self.src) else None
@@ -207,6 +257,10 @@ class _Parser:
             # Redundant at the ends under full-match semantics; meaningful
             # anywhere else, which this parser cannot express.
             if self.pos == 1 or self.pos == len(self.src):
+                if ch == "^" and self.pos == 1:
+                    self.anchored_start = True
+                elif ch == "$" and self.pos == len(self.src):
+                    self.anchored_end = True
                 return Empty()
             raise Unsupported(f"anchor {ch!r} is only supported at the pattern ends")
         if ch in "*+?":

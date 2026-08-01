@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 
 from .equivalence import equivalent
-from .execute import MatchTimeout, safe_fullmatch
+from .execute import MatchTimeout, safe_fullmatch, safe_search
 from .safety import screen
-from .types import CorrectnessResult, Report, Task
+from .types import CorrectnessResult, Report, Semantics, Task
 
 __all__ = ["check", "evaluate"]
 
@@ -15,9 +15,9 @@ __all__ = ["check", "evaluate"]
 def check(pattern: str, task: Task, timeout: float = 1.0) -> CorrectnessResult:
     """Run `pattern` against a task's positive and negative examples.
 
-    Uses full-match semantics. A timeout counts as a failed example rather
-    than an exception, so one pathological pattern cannot abort a benchmark
-    sweep.
+    Matching follows the task's semantics — full match or search. A timeout
+    counts as a failed example rather than an exception, so one pathological
+    pattern cannot abort a benchmark sweep.
     """
     try:
         re.compile(pattern)
@@ -25,13 +25,14 @@ def check(pattern: str, task: Task, timeout: float = 1.0) -> CorrectnessResult:
         total = len(task.positives) + len(task.negatives)
         return CorrectnessResult(0, total, error=f"does not compile: {exc}")
 
+    match = safe_search if task.semantics is Semantics.SEARCH else safe_fullmatch
     passed = 0
     false_negatives: list[str] = []
     false_positives: list[str] = []
 
     for text in task.positives:
         try:
-            matched = safe_fullmatch(pattern, text, timeout=timeout)
+            matched = match(pattern, text, timeout=timeout)
         except (MatchTimeout, re.error):
             matched = False
         if matched:
@@ -41,7 +42,7 @@ def check(pattern: str, task: Task, timeout: float = 1.0) -> CorrectnessResult:
 
     for text in task.negatives:
         try:
-            matched = safe_fullmatch(pattern, text, timeout=timeout)
+            matched = match(pattern, text, timeout=timeout)
         except (MatchTimeout, re.error):
             matched = True
         if matched:
@@ -62,7 +63,11 @@ def evaluate(pattern: str, task: Task, timeout: float = 1.0) -> Report:
     reference pattern is available."""
     correctness = check(pattern, task, timeout=timeout)
     safety = screen(pattern)
-    equivalence = equivalent(pattern, task.reference) if task.reference else None
+    equivalence = (
+        equivalent(pattern, task.reference, semantics=task.semantics)
+        if task.reference
+        else None
+    )
     return Report(
         pattern=pattern,
         correctness=correctness,
