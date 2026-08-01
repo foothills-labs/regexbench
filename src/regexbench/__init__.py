@@ -18,7 +18,8 @@ reference is the wrong metric and unsafe output is a real cost.
 from ._parse import NonRegular, Unsupported
 from .correctness import check, evaluate
 from .equivalence import equivalent, is_regular
-from .execute import MatchTimeout, safe_fullmatch, safe_search
+from .execute import MatchTimeout, match_many, safe_fullmatch, safe_search
+from .harness import CandidateResult, SuiteReport, TaskResult, pass_at_k, run
 from .safety import attack_strings, screen
 from .types import (
     CorrectnessResult,
@@ -35,6 +36,7 @@ from .types import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "CandidateResult",
     "CorrectnessResult",
     "Dialect",
     "EquivalenceResult",
@@ -44,7 +46,9 @@ __all__ = [
     "Risk",
     "SafetyResult",
     "Semantics",
+    "SuiteReport",
     "Task",
+    "TaskResult",
     "Unsupported",
     "Verdict",
     "__version__",
@@ -53,6 +57,9 @@ __all__ = [
     "equivalent",
     "evaluate",
     "is_regular",
+    "match_many",
+    "pass_at_k",
+    "run",
     "safe_fullmatch",
     "safe_search",
     "screen",
