@@ -45,9 +45,36 @@ Scoring the corpus against itself — `--use-reference` — gives:
 | Metric | Value | What it means |
 | --- | --- | --- |
 | `pass@1` | 99.9–100% | the references pass their own tests, so the corpus is loaded correctly |
-| `dfa-eq@1` | 77.4% | the engine's ceiling: 172 tasks are undecidable, mostly lookaround and `\b` |
-| `dfa-eq@1 (decided)` | 100.0% | of what could be checked, the gold answers are of course all correct |
+| `dfa-eq@1` | 100% | reflexivity — identical patterns, no automaton consulted |
 | `vulnerable@1` | 14.2% | 108 of the corpus's own reference expressions are ReDoS-vulnerable |
+
+`dfa-eq@1` of 100% here is not a coverage measurement. Identical text denotes
+identical languages, so `equivalent()` short-circuits before parsing — which is
+also what the reference tooling does, and what keeps scores comparable. To
+measure how much of a corpus this engine can actually analyze, parse the
+references instead:
+
+```python
+from regexbench import is_regular
+from regexbench.datasets import load_regexeval
+
+tasks = load_regexeval("RegexEval.json")
+analyzable = sum(is_regular(t.reference, dialect=t.dialect) for t in tasks)
+print(f"{analyzable}/{len(tasks)}")     # 604/762 = 79.3%
+```
+
+| Corpus | References this engine can parse |
+| --- | --- |
+| Re(gEx|DoS)Eval | 79.3% |
+| KB13 | 51.1% |
+| NL-RX-Synth / NL-RX-Turk | 81.0% |
+
+Treat that as an **upper bound** on comparability rather than a guarantee. Both
+sides of a comparison contribute to the alphabet, so a reference that parses on
+its own can still exceed the determinization limit against a particular
+candidate — 604 of Re(gEx|DoS)Eval's references parse, and 590 survived being
+compared against themselves before reflexivity made that check trivial. The
+`undecided` count in an actual run is the number that applies to that run.
 
 `pass@1` moves between 99.9% and 100% run to run, and the cause is not the
 loader. One record, `regexeval/1660`, has a gold reference that is itself a
@@ -148,9 +175,9 @@ unrecognised field is an error rather than a typo you find out about later.
 ## Reading a score
 
 `--use-reference` first, always. It costs one run and tells you whether the
-corpus is loaded correctly and what ceiling the engine puts on it. A `pass@1`
-far under 100% means the semantics are wrong; the `dfa-eq@1` it reports is the
-most any model could score.
+corpus is loaded correctly: a `pass@1` far under 100% means the match semantics
+are wrong. It will report `dfa-eq@1` of 100% by reflexivity, which says nothing
+about coverage — use the `is_regular` count above for that.
 
 `dfa-eq` is reported twice, because there are two honest questions and one
 number cannot answer both:
@@ -162,10 +189,11 @@ number cannot answer both:
   what we could check, how much was correct" — the model on its own, blind to
   engine coverage.
 
-On KB13 the gold answers themselves score 51.1% by the first reading and 100.0%
-by the second. That 49-point spread is not a model result at all; it is `\b`.
-Watch both, and treat a gap between them as a statement about this engine
-rather than about whatever you are scoring.
+KB13 makes the spread concrete: only 51.1% of its references can be analyzed
+at all, so on the other 48.9% every candidate that is not textually identical
+comes back undecidable and scores zero under the first reading. Watch both, and
+treat a gap between them as a statement about this engine rather than about
+whatever you are scoring.
 
 `exact` is reported for contrast: where equivalence is decidable, `dfa-eq`
 above `exact` is the share of answers that are right and would be marked wrong
@@ -215,3 +243,47 @@ corpus's own strings.
 So change it once, deliberately, and keep it fixed across runs you intend to
 compare — a timeout is part of a score's definition, not a tuning knob to reach
 for after seeing the number.
+
+## References
+
+The claims in this document were checked against these sources rather than
+inferred from the data alone.
+
+- **dk.brics.automaton `RegExp` syntax** —
+  <https://www.brics.dk/automaton/doc/dk/brics/automaton/RegExp.html>. The
+  grammar and its precedence (union < intersection < concatenation <
+  repetition < complement), `#` for the empty language, `@` for any string, and
+  the fact that `&` and `~` are optional syntax flags rather than always-on
+  operators. `regexbench`'s BRICS dialect implements this grammar.
+- **Chen and others, *Evaluating Large Language Models Trained on Code*, 2021**
+  — <https://arxiv.org/abs/2107.03374>. The unbiased pass@k estimator
+  `1 - C(n-c, k) / C(n, k)`, and the numerically stable product form used here
+  because binomial coefficients overflow at benchmark-sized `n`.
+- **Siddiq and others, *Re(gEx|DoS)Eval*, ICSE-NIER 2024** —
+  <https://github.com/s2e-lab/RegexEval>. Source of the corpus, and of pass@k
+  and vulnerable@k as a paired metric. Their `Evaluation/DFA_Equ_Evaluation.py`
+  returns true on string equality before invoking `regex_dfa_equals.jar`, which
+  is why `equivalent()` here short-circuits on identical patterns.
+- **Siddiq and others, *Understanding ReDoS: Insights from LLM-Generated
+  Regexes and Developer Forums*, ICPC 2024** —
+  <https://dl.acm.org/doi/10.1145/3643916.3644424>. The five vulnerability
+  families (nested quantifiers, exponential overlapping disjunction,
+  exponential overlapping adjacency, polynomial overlapping adjacency, starting
+  with large quantifier), and the finding that LLM-generated regexes skew
+  polynomial. The structural pass here covers the first, second and fourth.
+- **Gelade and Neven, *Succinctness of the Complement and Intersection of
+  Regular Expressions*** —
+  <https://www.cs.umd.edu/~gasarch/TOPICS/desc/regexpcompint.pdf>. Equivalence
+  of plain regular expressions is PSPACE-complete, but with *both* complement
+  and intersection it is non-elementary — which is why the BRICS dialect refuses
+  deeply nested `&`/`~` at a state budget instead of trying.
+- **Locascio and others, EMNLP 2016 (NL-RX)** and **Kushman and Barzilay, NAACL
+  2013 (KB13)** — <https://github.com/nicholaslocascio/deep-regex>. Corpus
+  sizes confirmed: KB13 is 824 expert-written pairs, NL-RX-Turk 10,000
+  crowdsourced ones.
+
+One thing this document does **not** claim, because no source was found for it:
+how the reference tooling interprets `\b` in these corpora. The dk.brics grammar
+has no word-boundary construct and escapes `\b` to a literal `b`, while the
+descriptions plainly mean a word boundary. `regexbench` refuses rather than
+picking one, and the ceiling that imposes is reported above.

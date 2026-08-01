@@ -82,6 +82,16 @@ equivalent("([0-9])&([0-4])", "[0-4]", dialect=Dialect.BRICS).verdict  # EQUIVAL
 `&` appears in 22.8% of KB13 and 27.3% of NL-RX, `~` in 7.6% and 17.2%. The
 dialect is never sniffed, because both readings compile and only one is right.
 
+The grammar follows
+[dk.brics.automaton](https://www.brics.dk/automaton/doc/dk/brics/automaton/RegExp.html)
+exactly, including precedence — union binds loosest, then intersection, then
+concatenation, then repetition, then complement. Note that equivalence with
+*both* complement and intersection is
+[non-elementary](https://www.cs.umd.edu/~gasarch/TOPICS/desc/regexpcompint.pdf),
+not merely PSPACE-complete: deeply nested `&`/`~` is refused with
+`UNSUPPORTED` once determinization passes a state budget, rather than run until
+the machine gives up.
+
 ## ReDoS safety
 
 Two passes. Structural analysis finds the shapes that backtrack
@@ -99,6 +109,15 @@ screen(r"\d{3}-\d{4}").risk  # <Risk.SAFE>
 
 `SAFE` means "no known-bad shape and no blow-up on what we tried". That is a
 screening result, not a proof.
+
+The structural pass covers three of the five vulnerability families named in
+[the ICPC 2024 study of LLM-generated regexes](https://dl.acm.org/doi/10.1145/3643916.3644424):
+nested quantifiers, exponential overlapping disjunction, and polynomial
+overlapping adjacency. Exponential overlapping adjacency and starting-with-large-quantifier
+are not modelled structurally and are only caught when the empirical pass
+happens to trip them. That study also found LLM-generated regexes skew toward
+*polynomial* ReDoS — the cheaper family to miss, and the one a short attack
+string is least likely to expose.
 
 ## Running untrusted patterns
 
@@ -176,13 +195,13 @@ print(report.table(ks=(1, 5)))
 ```
 my-model
 762 tasks, 762 answered
-  pass@1               99.9%
-  dfa-eq@1             77.4%  (whole corpus — a lower bound)
-  dfa-eq@1 (decided)  100.0%  (engine limits excluded — model only)
-  exact@1             100.0%
-  usable@1             85.8%
-  vulnerable@1         14.2%  (lower is better)
-  172 task(s) undecidable — counted against dfa-eq, excluded from dfa-eq (decided)
+  pass@1               77.0%
+  dfa-eq@1             56.2%  (whole corpus — a lower bound)
+  dfa-eq@1 (decided)   74.9%  (engine limits excluded — model only)
+  exact@1              55.4%
+  usable@1             65.4%
+  vulnerable@1         12.1%  (lower is better)
+  180 task(s) undecidable — counted against dfa-eq, excluded from dfa-eq (decided)
 ```
 
 `predictions` is a mapping from task name to the pattern, or to a list of
@@ -216,11 +235,9 @@ Exit codes are meaningful, so these compose in CI: `0` on equivalent/safe/all
 passing, `1` otherwise.
 
 `run` also takes `--use-reference`, which scores every task against its own
-gold answer. That sounds circular and is the most useful thing here: it
-separates what the corpus can tell you from what your model did. A `pass@1`
-below 100% means the dataset is loaded with the wrong match semantics, and the
-`dfa-eq@1` it reports is the ceiling this engine imposes — no model can be
-measured above it.
+gold answer. That sounds circular and is the cheapest sanity check available:
+if `pass@1` comes back well below 100%, the dataset is loaded with the wrong
+match semantics and every later number is meaningless.
 
 ## Supported syntax
 

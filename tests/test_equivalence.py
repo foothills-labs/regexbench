@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from regexbench import Verdict, equivalent, is_regular
+from regexbench import Dialect, Semantics, Verdict, equivalent, is_regular
 
 
 @pytest.mark.parametrize(
@@ -86,3 +86,41 @@ def test_dot_excludes_newline():
 def test_unsupported_syntax_is_flagged_separately_from_undecidable():
     result = equivalent(r"a{2,1}", r"a")
     assert result.verdict is Verdict.UNSUPPORTED
+
+
+def test_a_pattern_is_equivalent_to_itself_even_when_undecidable():
+    """Reflexivity needs no automaton.
+
+    A pattern's language is a function of its text, so identical text denotes
+    identical languages — including for backreferences and lookaround, where
+    nothing else here can reach a verdict. The reference tooling agrees:
+    Re(gEx|DoS)Eval's DFA_Equ_Evaluation returns true on string equality before
+    invoking regex_dfa_equals.jar, so matching it keeps scores comparable.
+    """
+    for pattern in (r"(a)\1", r"(?=a)ab", r"\bword\b", r"\d+"):
+        result = equivalent(pattern, pattern)
+        assert result.verdict is Verdict.EQUIVALENT, f"{pattern!r} differs from itself"
+        assert result.witness is None
+
+
+def test_reflexivity_holds_under_every_setting():
+    for kwargs in (
+        {},
+        {"semantics": Semantics.SEARCH},
+        {"dialect": Dialect.BRICS},
+        {"semantics": Semantics.SEARCH, "dialect": Dialect.BRICS},
+    ):
+        assert equivalent(r"~(a)\1", r"~(a)\1", **kwargs).verdict is Verdict.EQUIVALENT
+
+
+def test_an_intractable_intersection_is_refused_rather_than_attempted():
+    """Equivalence with both & and ~ is non-elementary, so the guard matters.
+
+    Sixteen intersected patterns is well inside what a corpus can contain and
+    well past what determinizing can afford. It must come back UNSUPPORTED
+    quickly rather than exhaust memory.
+    """
+    pattern = "&".join(f"(.*{c}.*)" for c in "abcdefghijklmnop")
+    result = equivalent(pattern, "x", dialect=Dialect.BRICS)
+    assert result.verdict is Verdict.UNSUPPORTED
+    assert "too many" in result.reason

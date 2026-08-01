@@ -95,8 +95,10 @@ class TestMetrics:
         assert report.dfa_eq_at(1) == 1.0
 
     def test_an_undecidable_comparison_counts_against_dfa_eq(self):
+        # Textually different, both non-regular: nothing can decide this. (The
+        # same pattern twice would be settled by reflexivity, not analysis.)
         task = Task(reference=r"(a)\1", name="backref")
-        report = run([task], [r"(a)\1"])
+        report = run([task], [r"(b)\1"])
         assert report.dfa_eq_at(1) == 0.0, "undecidable must not be scored as equivalent"
         assert report.undecided == 1, "...but it must be reported separately"
 
@@ -165,7 +167,7 @@ class TestPresentation:
         assert "dfa-eq@1" in table
 
     def test_table_names_the_model_and_flags_undecidable_tasks(self):
-        report = run([Task(reference=r"(a)\1", name="backref")], [r"(a)\1"], name="m")
+        report = run([Task(reference=r"(a)\1", name="backref")], [r"(b)\1"], name="m")
         table = report.table()
         assert table.startswith("m")
         assert "undecidable" in table
@@ -180,7 +182,7 @@ class TestDecidedSubset:
             Task(reference=r"(a)\1", name="undecidable1"),
             Task(reference=r"(a)\1", name="undecidable2"),
         ]
-        report = run(tasks, [r"[0-9]+", r"[0-9]+", r"(a)\1", r"(a)\1"])
+        report = run(tasks, [r"[0-9]+", r"[0-9]+", r"(b)\1", r"(b)\1"])
 
         assert report.undecided == 2
         assert report.dfa_eq_at(1) == pytest.approx(0.5), "whole corpus: a lower bound"
@@ -191,7 +193,7 @@ class TestDecidedSubset:
         assert report.dfa_eq_at(1) == report.dfa_eq_decided_at(1) == 1.0
 
     def test_the_decided_reading_is_none_when_nothing_is_decidable(self):
-        report = run([Task(reference=r"(a)\1", name="x")], [r"(a)\1"])
+        report = run([Task(reference=r"(a)\1", name="x")], [r"(b)\1"])
         assert report.dfa_eq_at(1) == 0.0
         assert report.dfa_eq_decided_at(1) is None, "no decidable task to average over"
 
