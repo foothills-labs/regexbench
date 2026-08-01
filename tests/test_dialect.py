@@ -76,12 +76,20 @@ def test_the_two_dialects_disagree_about_the_same_text():
     assert equivalent(pattern, "#", dialect=BRICS).verdict is Verdict.EQUIVALENT
 
 
-def test_word_boundaries_are_refused_rather_than_guessed():
-    # `\b` is a word boundary in the corpora's intent and a literal 'b' in the
-    # dk.brics spec. Both readings are defensible, so neither is assumed.
-    result = equivalent(r".*\b[A-Za-z]*er\b.*", "x", dialect=BRICS)
-    assert result.verdict is Verdict.UNSUPPORTED
-    assert "\\b" in result.reason
+def test_word_boundaries_are_read_as_boundaries_not_as_a_literal_b():
+    """A deliberate, documented deviation from the dk.brics spec.
+
+    dk.brics escapes `\b` to the literal character 'b'. The corpora that use
+    this dialect mean a word boundary, and their paired descriptions say so —
+    KB13 glosses `.*\b[A-Za-z]*er\b.*` as "lines using words ending in 'er'",
+    which the literal reading does not describe at all. The intent wins.
+    """
+    boundary = r".*\bab\b.*"
+    assert equivalent(boundary, r".*ab.*", dialect=BRICS).verdict is Verdict.DIFFERENT
+    # Under the literal-'b' reading it would instead mean this, which it does not.
+    assert equivalent(boundary, r".*bab b.*", dialect=BRICS).verdict is Verdict.DIFFERENT
+    # A word in isolation is found; the same letters inside a longer word are not.
+    assert equivalent(boundary, r".*ab.*", dialect=BRICS).witness is not None
 
 
 def test_brics_patterns_are_not_executed_by_re():
