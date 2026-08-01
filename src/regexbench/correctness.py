@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from .equivalence import equivalent
-from .execute import MatchTimeout, safe_fullmatch, safe_search
+from .execute import match_many
 from .safety import screen
 from .types import CorrectnessResult, Dialect, Report, Risk, SafetyResult, Semantics, Task
 
@@ -35,27 +35,31 @@ def check(pattern: str, task: Task, timeout: float = 1.0) -> CorrectnessResult:
     except re.error as exc:
         return CorrectnessResult(0, total, error=f"does not compile: {exc}")
 
-    match = safe_search if task.semantics is Semantics.SEARCH else safe_fullmatch
+    method = "search" if task.semantics is Semantics.SEARCH else "fullmatch"
+    try:
+        outcomes = match_many(
+            pattern, task.positives + task.negatives, method=method, timeout=timeout
+        )
+    except re.error as exc:  # pragma: no cover - the compile check above catches these
+        return CorrectnessResult(0, total, error=f"does not compile: {exc}")
+
     passed = 0
     false_negatives: list[str] = []
     false_positives: list[str] = []
 
-    for text in task.positives:
-        try:
-            matched = match(pattern, text, timeout=timeout)
-        except (MatchTimeout, re.error):
-            matched = False
+    split = len(task.positives)
+    for text, matched in zip(task.positives, outcomes[:split], strict=True):
+        # A timeout is None, which counts as "did not match" here — the
+        # example is failed rather than the sweep aborted.
         if matched:
             passed += 1
         else:
             false_negatives.append(text)
 
-    for text in task.negatives:
-        try:
-            matched = match(pattern, text, timeout=timeout)
-        except (MatchTimeout, re.error):
-            matched = True
-        if matched:
+    for text, matched in zip(task.negatives, outcomes[split:], strict=True):
+        # ...and as "did match" here, so a pattern that hangs is never scored
+        # as correctly rejecting anything.
+        if matched is None or matched:
             false_positives.append(text)
         else:
             passed += 1
