@@ -169,3 +169,35 @@ class TestPresentation:
         table = report.table()
         assert table.startswith("m")
         assert "undecidable" in table
+
+
+class TestDecidedSubset:
+    def test_the_two_dfa_eq_readings_differ_by_the_undecidable_tasks(self):
+        """A flawless model, half of whose tasks the engine cannot analyze."""
+        tasks = [
+            Task(reference=r"\d+", name="ok1"),
+            Task(reference=r"\d+", name="ok2"),
+            Task(reference=r"(a)\1", name="undecidable1"),
+            Task(reference=r"(a)\1", name="undecidable2"),
+        ]
+        report = run(tasks, [r"[0-9]+", r"[0-9]+", r"(a)\1", r"(a)\1"])
+
+        assert report.undecided == 2
+        assert report.dfa_eq_at(1) == pytest.approx(0.5), "whole corpus: a lower bound"
+        assert report.dfa_eq_decided_at(1) == 1.0, "decidable subset: the model was perfect"
+
+    def test_both_readings_agree_when_everything_is_decidable(self):
+        report = run([digits_task()], [r"[0-9]+"])
+        assert report.dfa_eq_at(1) == report.dfa_eq_decided_at(1) == 1.0
+
+    def test_the_decided_reading_is_none_when_nothing_is_decidable(self):
+        report = run([Task(reference=r"(a)\1", name="x")], [r"(a)\1"])
+        assert report.dfa_eq_at(1) == 0.0
+        assert report.dfa_eq_decided_at(1) is None, "no decidable task to average over"
+
+    def test_the_table_labels_which_reading_is_which(self):
+        tasks = [Task(reference=r"\d+", name="ok"), Task(reference=r"(a)\1", name="no")]
+        table = run(tasks, [r"[0-9]+", r"(a)\1"]).table()
+        assert "dfa-eq@1 (decided)" in table
+        assert "whole corpus" in table
+        assert "model only" in table

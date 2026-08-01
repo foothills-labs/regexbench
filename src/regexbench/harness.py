@@ -190,6 +190,28 @@ class SuiteReport:
             lambda result: sum(1 for c in result.candidates if c.equivalent),
         )
 
+    def dfa_eq_decided_at(self, k: int = 1) -> float | None:
+        """Semantic equivalence over only the tasks the engine could decide.
+
+        The companion to `dfa_eq_at`, and the two answer different questions.
+        `dfa_eq_at` asks how much of the corpus was verified correct, so an
+        engine limit counts against the model. This asks how much of what could
+        be checked was correct, so it measures the model alone.
+
+        On KB13 a flawless model scores 51.1% by the first reading and 100% by
+        the second; the difference is entirely `\\b`. Neither number is wrong
+        and neither is sufficient, which is why both are reported.
+
+        A task counts as decided when at least one of its candidates produced a
+        verdict — undecidable candidates within a decided task still count as
+        failures, since something comparable was available and this was not it.
+        """
+        return self._estimate(
+            k,
+            lambda result: result.task.reference is not None and not result.undecided,
+            lambda result: sum(1 for c in result.candidates if c.equivalent),
+        )
+
     def exact_at(self, k: int = 1) -> float | None:
         """String equality with the reference — the metric this package argues against."""
         return self._estimate(
@@ -239,6 +261,7 @@ class SuiteReport:
         for k in ks:
             metrics[f"pass@{k}"] = self.pass_at(k)
             metrics[f"dfa-eq@{k}"] = self.dfa_eq_at(k)
+            metrics[f"dfa-eq@{k} (decided)"] = self.dfa_eq_decided_at(k)
             metrics[f"exact@{k}"] = self.exact_at(k)
             metrics[f"usable@{k}"] = self.usable_at(k)
             metrics[f"vulnerable@{k}"] = self.vulnerable_at(k)
@@ -264,13 +287,22 @@ class SuiteReport:
         summary = self.summary(ks)
         metrics: dict[str, float | None] = summary["metrics"]  # type: ignore[assignment]
         width = max(len(label) for label in metrics)
+        notes = {"vulnerable": "  (lower is better)"}
         for label, value in metrics.items():
             shown = "n/a" if value is None else f"{value:.1%}"
-            note = "  (lower is better)" if label.startswith("vulnerable") else ""
+            if label.startswith("vulnerable"):
+                note = notes["vulnerable"]
+            elif label.endswith("(decided)"):
+                note = "  (engine limits excluded — model only)"
+            elif label.startswith("dfa-eq"):
+                note = "  (whole corpus — a lower bound)"
+            else:
+                note = ""
             lines.append(f"  {label:<{width}}  {shown:>6}{note}")
         if self.undecided:
             lines.append(
-                f"  {self.undecided} task(s) undecidable — counted against dfa-eq"
+                f"  {self.undecided} task(s) undecidable — counted against dfa-eq, "
+                f"excluded from dfa-eq (decided)"
             )
         if self.errors:
             lines.append(f"  {self.errors} candidate(s) failed to evaluate")
