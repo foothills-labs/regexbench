@@ -249,10 +249,20 @@ language (`#`) — all regular operations, computed on the automata directly.
 Anything else returns `UNSUPPORTED` or `UNDECIDABLE` rather than a wrong
 answer.
 
-Word boundaries (`\b`) are refused in both dialects. The corpora that use them
-mean a word boundary; the dk.brics spec says a literal `b`. Both readings are
-defensible, so neither is assumed — which is the single biggest limit on
-coverage today, and the clearest thing to fix next.
+Word boundaries (`\b`, `\B`) are supported. They look like lookaround and are
+not: the condition depends only on the two characters either side of a
+position, so a finite automaton can carry it in one bit of state. Deciding it
+does require the alphabet to tell word characters from the rest, which is why
+"every other character" is two symbols here rather than one.
+
+In the dk.brics dialect this is a deliberate deviation from the spec, which
+escapes `\b` to the literal character `b`. The corpora mean a boundary and
+their paired descriptions say so — KB13 glosses `.*\b[A-Za-z]*er\b.*` as "lines
+using words ending in 'er'", which the literal reading does not describe.
+
+`\B` follows Python rather than mathematics: it is `¬\b` everywhere except the
+empty string, which `re` refuses even though no boundary exists there. Patterns
+scored here are run by `re`, so `re` is what gets modelled.
 
 Correctness scoring and ReDoS screening have no such limit — they run the real
 `re` engine and work on any pattern it compiles.

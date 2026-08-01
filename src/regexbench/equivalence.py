@@ -11,14 +11,17 @@ Equivalence is defined over **full matches**, matching `re.fullmatch`.
 from __future__ import annotations
 
 from ._automata import build_dfa, find_distinguishing_string
-from ._parse import OTHER, NonRegular, Unsupported, parse
+from ._parse import OTHER_NONWORD, OTHER_WORD, NonRegular, Unsupported, parse
 from .types import Dialect, EquivalenceResult, Semantics, Verdict
 
 __all__ = ["equivalent", "is_regular"]
 
-# Candidates for the concrete stand-in for "some character neither pattern
-# names". Any character works as long as neither pattern mentions it.
-_FILLERS = "\x01abcxyz0123456789 !~"
+# Concrete stand-ins for "some character neither pattern names". Any character
+# works as long as neither pattern mentions it — but the two sentinels mean
+# different things, so a word character must stand in for one and a non-word
+# character for the other, or a witness involving `\\b` would not reproduce.
+_WORD_FILLERS = "xyzabcXYZABC0123456789_defghijklmnopqrstuvwDEFGHIJKLMNOPQRSTUVW"
+_NONWORD_FILLERS = " !~.-+@#%^&*()[]{}<>/\\|:;\'\"`,?$\x01"
 
 
 def equivalent(
@@ -63,10 +66,20 @@ def equivalent(
         return EquivalenceResult(Verdict.UNSUPPORTED, reason=f"right pattern: {exc}")
 
     named = left_chars | right_chars
-    alphabet = (*sorted(named), OTHER)
-    filler = next((c for c in _FILLERS if c not in named), None)
-    if filler is None:  # pragma: no cover - would need every filler named
-        filler = "￿"
+    # A sentinel only earns a place in the alphabet if some character it could
+    # stand for is actually unnamed. `\\w` names every word character there is
+    # under this engine's ASCII model, and an OTHER_WORD with no member left to
+    # denote would produce witnesses that do not reproduce.
+    alphabet = tuple(sorted(named))
+    fillers: dict[str, str] = {}
+    for sentinel, candidates in (
+        (OTHER_WORD, _WORD_FILLERS),
+        (OTHER_NONWORD, _NONWORD_FILLERS),
+    ):
+        filler = next((c for c in candidates if c not in named), None)
+        if filler is not None:
+            alphabet += (sentinel,)
+            fillers[sentinel] = filler
 
     try:
         left_dfa = build_dfa(left_ast, alphabet)
@@ -74,7 +87,7 @@ def equivalent(
     except Unsupported as exc:
         return EquivalenceResult(Verdict.UNSUPPORTED, reason=str(exc))
 
-    witness = find_distinguishing_string(left_dfa, right_dfa, filler)
+    witness = find_distinguishing_string(left_dfa, right_dfa, fillers)
     if witness is None:
         return EquivalenceResult(Verdict.EQUIVALENT)
 

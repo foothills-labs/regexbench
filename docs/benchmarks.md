@@ -65,9 +65,9 @@ print(f"{analyzable}/{len(tasks)}")     # 604/762 = 79.3%
 
 | Corpus | References this engine can parse |
 | --- | --- |
-| Re(gEx|DoS)Eval | 79.3% |
-| KB13 | 51.1% |
-| NL-RX-Synth / NL-RX-Turk | 81.0% |
+| Re(gEx|DoS)Eval | 82.5% |
+| KB13 | 100% |
+| NL-RX-Synth / NL-RX-Turk | 100% |
 
 Treat that as an **upper bound** on comparability rather than a guarantee. Both
 sides of a comparison contribute to the alphabet, so a reference that parses on
@@ -127,7 +127,7 @@ aligned, with no trailing newline.
 | Patterns using `&` | 22.8% | 27.3% | 27.3% |
 | Patterns using `~` | 7.6% | 17.2% | 17.2% |
 | Patterns using `\b` | 48.9% | 19.0% | 19.0% |
-| Parseable today | 51.1% | 81.0% | 81.0% |
+| Parseable today | 100% | 100% | 100% |
 
 **They carry no worked examples.** A record is a description and a gold
 pattern. `pass@k` over these corpora is `None`, not zero — the only available
@@ -137,12 +137,18 @@ score is `dfa-eq@k`, which is exactly the metric this literature reports.
 complement; `re` compiles both as literals and would silently mis-score a
 quarter to two fifths of each corpus. The loader sets `Dialect.BRICS`.
 
-**`\b` is the coverage ceiling.** Every rejection in the table above is a word
-boundary — no other construct in any of the three corpora is refused, and
-nothing crashes. Those records still load, and count against `dfa-eq` as
-undecidable, so the score stays a lower bound over the whole corpus. Supporting
-`\b` would lift KB13 from 51.1% to essentially complete, and is the highest
-value change available to this engine.
+**Every pattern in all three corpora is analyzable.** Word boundaries used to
+be refused, which capped KB13 at 51.1% and NL-RX at 81.0%; they are supported
+now, and nothing else in these corpora is rejected. Whatever `dfa-eq` reports
+on them is a statement about the model, not about this engine.
+
+Two notes on the `\b` reading. It deviates from the dk.brics spec, which
+escapes `\b` to the literal character `b` — the corpora mean a boundary, and
+their descriptions say so. And 14.6% of KB13 puts a boundary inside a `&` or
+`~`, where the operand gets determinized and so bakes in an assumption about
+what precedes it; the sub-machine is built once per possible context and
+entered on the real one, because `x((\bab)&(ab))` matches nothing and a
+sub-machine that thought it began the string would say otherwise.
 
 ---
 
@@ -217,8 +223,22 @@ Measured on Re(gEx|DoS)Eval, one candidate costs about **75 ms**, split:
 
 Screening dominates, and it is the part that has to start processes: the only
 way to know a pattern hangs is to run it somewhere killable. A `--use-reference`
-pass over all 762 tasks takes about 20 seconds, and NL-RX-Turk's 10,000
-equivalence comparisons — no examples, no screening — take about a minute.
+pass over all 762 tasks takes about 20 seconds.
+
+Equivalence on the dk.brics corpora costs more, and varies by an order of
+magnitude between them:
+
+| Corpus | Per comparison | Whole corpus, single-threaded |
+| --- | --- | --- |
+| NL-RX-Turk | 17 ms | ~3 minutes |
+| KB13 | 609 ms | ~8 minutes |
+
+KB13 is the expensive one because its patterns are: `[A-Za-z]` names 52
+characters, so the alphabet is an order of magnitude wider than NL-RX's, and
+48.9% of them also carry a word boundary and 14.6% an operator whose operand
+has to be determinized once per entry context. Half that corpus used to return
+UNSUPPORTED in microseconds, which is cheaper only in the sense that not
+answering is cheaper than answering. Use `--workers`.
 
 Vulnerable candidates cost more, and unavoidably so: confirming a hang means
 waiting out the timeout, once per example. A candidate that hangs on all 25 of
@@ -285,5 +305,7 @@ inferred from the data alone.
 One thing this document does **not** claim, because no source was found for it:
 how the reference tooling interprets `\b` in these corpora. The dk.brics grammar
 has no word-boundary construct and escapes `\b` to a literal `b`, while the
-descriptions plainly mean a word boundary. `regexbench` refuses rather than
-picking one, and the ceiling that imposes is reported above.
+descriptions plainly mean a word boundary. `regexbench` implements the
+described intent and says so here, rather than the spec's letter — if the
+reference tooling turns out to preprocess these patterns some third way, the
+KB13 numbers would need re-basing against it.

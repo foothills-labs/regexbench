@@ -151,12 +151,17 @@ class TestDeepRegex:
             task.reference, "[^e]*", dialect=task.dialect
         ).verdict is Verdict.EQUIVALENT
 
-    def test_records_the_engine_cannot_represent_are_kept(self, kb13_dir):
+    def test_no_record_is_dropped_at_load_time(self, kb13_dir):
         """A loader that drops the hard records reports an uninterpretable number."""
         tasks = load_deep_regex(kb13_dir)
-        assert len(tasks) == 3, "the \\b record must survive loading"
-        unsupported = equivalent(tasks[2].reference, "x", dialect=Dialect.BRICS)
-        assert unsupported.verdict is Verdict.UNSUPPORTED
+        assert len(tasks) == 3
+
+    def test_word_boundary_records_are_analyzable(self, kb13_dir):
+        """`\\b` used to be refused, which cost KB13 half its corpus."""
+        word_boundary = load_deep_regex(kb13_dir)[2]
+        assert "\\b" in word_boundary.reference
+        result = equivalent(word_boundary.reference, ".*", dialect=Dialect.BRICS)
+        assert result.verdict is Verdict.DIFFERENT, "analyzed, not refused"
 
     def test_the_name_can_be_overridden(self, kb13_dir):
         tasks = load_deep_regex(kb13_dir, name="custom")

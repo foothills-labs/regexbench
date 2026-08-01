@@ -191,3 +191,119 @@ def test_brics_operators_agree_with_re(operator: str, seed: int) -> None:
             )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
+
+
+BOUNDARY_ATOMS = [*ATOMS, r"\b", r"\B", r"\bx", r"x\b", r"\w"]
+BOUNDARY_ALPHABET = "ab1 _"
+BOUNDARY_CORPUS = [""] + [
+    "".join(combo)
+    for length in (1, 2, 3, 4)
+    for combo in itertools.product(BOUNDARY_ALPHABET, repeat=length)
+]
+
+
+def _boundary_pattern(rng: random.Random, depth: int = 0) -> str:
+    atom = rng.choice(BOUNDARY_ATOMS)
+    # Quantifying a zero-width assertion is a syntax error in modern `re`.
+    if atom not in (r"\b", r"\B"):
+        atom += rng.choice(QUANTIFIERS)
+    if depth < 2 and rng.random() < 0.5:
+        atom += _boundary_pattern(rng, depth + 1)
+    return atom
+
+
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(3))
+def test_word_boundaries_agree_with_re(seed: int, semantics: Semantics) -> None:
+    """`\\b` is decided by splitting the alphabet and carrying one bit of state.
+
+    Both halves of that are easy to get subtly wrong — and `\\B` has a Python
+    quirk on the empty string — so every verdict is checked against `re`.
+    """
+    rng = random.Random(seed)
+    method = "search" if semantics is Semantics.SEARCH else "fullmatch"
+    checked = 0
+
+    for _ in range(200):
+        left, right = _boundary_pattern(rng), _boundary_pattern(rng)
+        if "\\b" not in left + right and "\\B" not in left + right:
+            continue
+        try:
+            compiled_left, compiled_right = re.compile(left), re.compile(right)
+        except re.error:
+            continue
+
+        result = equivalent(left, right, semantics=semantics)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+
+        def matches(compiled: re.Pattern[str], text: str) -> bool:
+            return getattr(compiled, method)(text) is not None
+
+        if result.verdict is Verdict.EQUIVALENT:
+            for text in BOUNDARY_CORPUS:
+                assert matches(compiled_left, text) == matches(compiled_right, text), (
+                    f"claimed {left!r} == {right!r} under {method}, "
+                    f"but they differ on {text!r}"
+                )
+        else:
+            witness = result.witness
+            assert witness is not None
+            assert matches(compiled_left, witness) != matches(compiled_right, witness), (
+                f"claimed {left!r} != {right!r} with witness {witness!r}, "
+                f"but re says they agree on it"
+            )
+
+    assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
+
+
+@pytest.mark.parametrize("seed", range(2))
+def test_assertions_inside_brics_operators_agree_with_re(seed: int) -> None:
+    """`&` and `~` determinize their operands, which bakes in a context.
+
+    Python has no intersection, but lookaround expresses one *with* the right
+    context: `P((A)&(B))` full-matches exactly what `P(?=(?:A)$)(?:B)` does,
+    and the lookahead is evaluated at the real position in the real string —
+    so a `\\b` inside A sees what the embedded sub-machine must see.
+    """
+    rng = random.Random(seed)
+    prefixes = ["", "x", "a", " ", "x*"]
+    checked = 0
+
+    for _ in range(500):
+        inner, other, candidate = (_boundary_pattern(rng) for _ in range(3))
+        prefix = rng.choice(prefixes)
+        if rng.random() < 0.5:
+            pattern = f"{prefix}(({inner})&({other}))"
+            reference = f"{prefix}(?=(?:{inner})$)(?:{other})"
+        else:
+            pattern = f"{prefix}(~({inner}))"
+            reference = f"{prefix}(?!(?:{inner})$)(?:.*)"
+        try:
+            compiled_reference = re.compile(reference)
+            compiled_candidate = re.compile(candidate)
+        except re.error:
+            continue
+
+        result = equivalent(pattern, candidate, dialect=Dialect.BRICS)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+
+        if result.verdict is Verdict.EQUIVALENT:
+            for text in BOUNDARY_CORPUS:
+                assert (compiled_reference.fullmatch(text) is not None) == (
+                    compiled_candidate.fullmatch(text) is not None
+                ), f"claimed {pattern!r} == {candidate!r}, but they differ on {text!r}"
+        else:
+            witness = result.witness
+            assert witness is not None
+            assert (compiled_reference.fullmatch(witness) is not None) != (
+                compiled_candidate.fullmatch(witness) is not None
+            ), (
+                f"claimed {pattern!r} != {candidate!r} with witness {witness!r}, "
+                f"but re says they agree on it"
+            )
+
+    assert checked > 40, "generator produced too few analyzable pairs to be meaningful"

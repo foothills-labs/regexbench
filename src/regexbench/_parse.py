@@ -19,12 +19,31 @@ from .types import Dialect, Semantics
 
 __all__ = ["parse", "Unsupported", "NonRegular", "Node"]
 
-# Sentinel standing for "any character not named anywhere in the patterns".
-OTHER = "\x00OTHER"
+# Sentinels standing for "a character not named anywhere in the patterns".
+#
+# There are two of them rather than one because `\b` can tell them apart. A
+# word boundary asks whether the characters either side of a position are word
+# characters, so an alphabet that lumps every unnamed character together cannot
+# answer it: `\bx` matches "!x" and not "ax", and both '!' and 'a' would be the
+# same symbol. Splitting the sentinel by word-ness keeps the alphabet finite
+# and still sound, because within each half the members remain indistinguishable
+# to both patterns.
+OTHER_WORD = "\x00OTHER_W"
+OTHER_NONWORD = "\x00OTHER_N"
+SENTINELS = (OTHER_WORD, OTHER_NONWORD)
 
 _DIGITS = frozenset("0123456789")
 _WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 _SPACE = frozenset(" \t\n\r\f\v")
+
+
+def is_word_symbol(symbol: str) -> bool:
+    """Whether an alphabet symbol counts as a word character for `\\b`."""
+    if symbol == OTHER_WORD:
+        return True
+    if symbol == OTHER_NONWORD:
+        return False
+    return symbol in _WORD
 
 _CLASS_ESCAPES: dict[str, tuple[frozenset[str], bool]] = {
     "d": (_DIGITS, False),
@@ -69,8 +88,8 @@ class CharSet(Node):
     negated: bool = False
 
     def accepts(self, symbol: str) -> bool:
-        if symbol == OTHER:
-            # OTHER stands for unnamed characters, so a positive set never
+        if symbol in SENTINELS:
+            # A sentinel stands for unnamed characters, so a positive set never
             # contains it and a negated set always does.
             return self.negated
         return (symbol in self.chars) != self.negated
@@ -91,6 +110,18 @@ class Repeat(Node):
     node: Node
     minimum: int
     maximum: int | None  # None means unbounded
+
+
+@dataclass(frozen=True)
+class Assert(Node):
+    """A zero-width word boundary: `\\b`, or `\\B` when negated.
+
+    Regular despite looking like lookaround — the condition depends only on the
+    two characters either side of the position, so a finite automaton can carry
+    it in its state.
+    """
+
+    negated: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,6 +165,23 @@ def parse(
     if semantics is Semantics.SEARCH:
         node = _widen_for_search(node, parser.anchored_start, parser.anchored_end)
     return node, frozenset(parser.literals)
+
+
+def uses_assertions(node: Node) -> bool:
+    """Whether `node` contains a word boundary anywhere, operators included."""
+    if isinstance(node, Assert):
+        return True
+    if isinstance(node, Concat):
+        return any(uses_assertions(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return any(uses_assertions(option) for option in node.options)
+    if isinstance(node, Intersect):
+        return any(uses_assertions(part) for part in node.parts)
+    if isinstance(node, Repeat):
+        return uses_assertions(node.node)
+    if isinstance(node, Complement):
+        return uses_assertions(node.node)
+    return False
 
 
 def any_char() -> CharSet:
@@ -350,7 +398,17 @@ class _Parser:
 
         if ch.isdigit() and ch != "0":
             raise NonRegular("backreferences make the language non-regular")
-        if ch in {"b", "B", "A", "Z", "z", "G"}:
+        if ch in {"b", "B"}:
+            # dk.brics defines \b as the literal 'b'; the corpora that use this
+            # dialect mean a word boundary, and their paired descriptions say
+            # so ("lines using words ending in 'er'"). The intent wins, and the
+            # deviation is documented rather than silent.
+            # Deliberately does not add the word characters to the alphabet:
+            # every symbol already has a well-defined word-ness, the sentinels
+            # included, so naming all 63 would multiply the alphabet — and the
+            # DFA — for nothing.
+            return Assert(negated=(ch == "B"))
+        if ch in {"A", "Z", "z", "G"}:
             raise Unsupported(f"anchor escape \\{ch} is not supported")
         if ch in _CLASS_ESCAPES:
             chars, negated = _CLASS_ESCAPES[ch]
