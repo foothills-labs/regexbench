@@ -181,6 +181,13 @@ Two levers:
   match needs, and it cuts the cost of every hang by ten.
 
 Set the timeout too low and slow-but-fine patterns start reporting as timeouts,
-which show up as failed examples. If a score moves when you change the timeout,
-that is what happened — so change it once, deliberately, and keep it fixed
-across the runs you intend to compare.
+which show up as failed examples. It is a real effect and a small one: on a
+2,286-candidate sweep, dropping the budget from 1 s to 0.1 s moved `pass@1`
+from 77.8% to 77.0% and left `dfa-eq`, `exact` and `vulnerable` identical, while
+taking the run from over sixteen minutes to under seven. Only example scoring
+can move, since it is the only metric that runs the pattern against the
+corpus's own strings.
+
+So change it once, deliberately, and keep it fixed across runs you intend to
+compare — a timeout is part of a score's definition, not a tuning knob to reach
+for after seeing the number.
