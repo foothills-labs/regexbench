@@ -67,19 +67,15 @@ def equivalent(
         # regex_dfa_equals.jar at all, so matching that keeps scores comparable.
         return EquivalenceResult(Verdict.EQUIVALENT, reason="identical patterns")
 
-    try:
-        left_ast, left_chars = parse(left, semantics=semantics, dialect=dialect)
-    except NonRegular as exc:
-        return EquivalenceResult(Verdict.UNDECIDABLE, reason=f"left pattern: {exc}")
-    except Unsupported as exc:
-        return EquivalenceResult(Verdict.UNSUPPORTED, reason=f"left pattern: {exc}")
-
-    try:
-        right_ast, right_chars = parse(right, semantics=semantics, dialect=dialect)
-    except NonRegular as exc:
-        return EquivalenceResult(Verdict.UNDECIDABLE, reason=f"right pattern: {exc}")
-    except Unsupported as exc:
-        return EquivalenceResult(Verdict.UNSUPPORTED, reason=f"right pattern: {exc}")
+    parsed = []
+    for side, pattern in (("left", left), ("right", right)):
+        try:
+            parsed.append(parse(pattern, semantics=semantics, dialect=dialect))
+        except NonRegular as exc:
+            return EquivalenceResult(Verdict.UNDECIDABLE, reason=f"{side} pattern: {exc}")
+        except Unsupported as exc:
+            return EquivalenceResult(Verdict.UNSUPPORTED, reason=f"{side} pattern: {exc}")
+    (left_ast, left_chars), (right_ast, right_chars) = parsed
 
     named = left_chars | right_chars
     # A sentinel only earns a place in the alphabet if some character it could

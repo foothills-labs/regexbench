@@ -46,11 +46,11 @@ class TestEq:
         assert "different" in out
         assert "witness" in out
 
-    def test_search_flag_changes_the_question(self, capsys):
+    def test_search_flag_changes_the_question(self):
         assert main(["eq", "a", ".*a.*"]) == 1
         assert main(["eq", "--search", "a", ".*a.*"]) == 0
 
-    def test_brics_flag_changes_the_dialect(self, capsys):
+    def test_brics_flag_changes_the_dialect(self):
         # `(a)&(b)` is the literal "a&b" in Python and the empty language in
         # dk.brics, so the same comparison flips.
         assert main(["eq", "(a)&(b)", r"a\&b"]) == 0
@@ -74,7 +74,7 @@ class TestCheck:
         assert main(["check", r"\d{3}", str(task)]) == 0
         assert "2/2" in capsys.readouterr().out
 
-    def test_a_task_file_can_ask_for_search_semantics(self, tmp_path, capsys):
+    def test_a_task_file_can_ask_for_search_semantics(self, tmp_path):
         task = tmp_path / "task.json"
         task.write_text(
             json.dumps({"positives": ["x123y"], "negatives": ["ab"], "semantics": "search"}),
@@ -119,7 +119,7 @@ class TestRun:
         )
         assert "2 tasks, 2 answered" in capsys.readouterr().out
 
-    def test_the_summary_can_be_written_as_json(self, regexeval_file, tmp_path, capsys):
+    def test_the_summary_can_be_written_as_json(self, regexeval_file, tmp_path):
         out_path = tmp_path / "summary.json"
         main(
             [

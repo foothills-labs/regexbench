@@ -133,37 +133,33 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+def _eq(args: argparse.Namespace) -> int:
+    result = equivalent(
+        args.left,
+        args.right,
+        semantics=Semantics.SEARCH if args.search else Semantics.FULLMATCH,
+        dialect=Dialect.BRICS if args.brics else Dialect.PYTHON,
+    )
+    print(result.verdict.value)
+    if result.witness is not None:
+        print(f"  witness: {result.witness!r}")
+    if result.reason:
+        print(f"  {result.reason}")
+    return 0 if result.verdict is Verdict.EQUIVALENT else 1
 
-    if args.command == "eq":
-        result = equivalent(
-            args.left,
-            args.right,
-            semantics=Semantics.SEARCH if args.search else Semantics.FULLMATCH,
-            dialect=Dialect.BRICS if args.brics else Dialect.PYTHON,
-        )
-        print(result.verdict.value)
-        if result.witness is not None:
-            print(f"  witness: {result.witness!r}")
-        if result.reason:
-            print(f"  {result.reason}")
-        return 0 if result.verdict is Verdict.EQUIVALENT else 1
 
-    if args.command == "safety":
-        result = screen(args.pattern, empirical=not args.no_empirical)
-        print(result.risk.value)
-        if result.reason:
-            print(f"  {result.reason}")
-        if result.witness:
-            print(f"  witness: {result.witness!r}")
-        return 1 if result.risk.is_vulnerable else 0
+def _safety(args: argparse.Namespace) -> int:
+    result = screen(args.pattern, empirical=not args.no_empirical)
+    print(result.risk.value)
+    if result.reason:
+        print(f"  {result.reason}")
+    if result.witness:
+        print(f"  witness: {result.witness!r}")
+    return 1 if result.risk.is_vulnerable else 0
 
-    if args.command == "run":
-        return _run(args)
 
-    with open(args.task, encoding="utf-8") as fh:
-        payload = json.load(fh)
+def _check(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.task).read_text(encoding="utf-8"))
     task = task_from_dict(payload, where=args.task)
     result = check(args.pattern, task)
     print(f"{result.passed}/{result.total} ({result.accuracy:.0%})")
@@ -174,6 +170,14 @@ def main(argv: list[str] | None = None) -> int:
     for text in result.false_positives:
         print(f"  should not match but does: {text!r}")
     return 0 if result.perfect else 1
+
+
+_COMMANDS = {"eq": _eq, "safety": _safety, "check": _check, "run": _run}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    return _COMMANDS[args.command](args)
 
 
 if __name__ == "__main__":

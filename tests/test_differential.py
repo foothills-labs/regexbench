@@ -7,6 +7,17 @@ cross-checks every verdict against `re`:
 * an EQUIVALENT verdict must hold for every string in the corpus
 * a DIFFERENT verdict must come with a witness that `re` agrees separates them
 
+Every scenario below is that same check with a different notion of "matches"
+and a different corpus, so they share :func:`cross_check`. What varies is the
+ground truth, and for two of them `re` has no direct equivalent:
+
+* `&` and `~` do not exist in `re`, but their *operands* do — a string is in
+  `(A)&(B)` exactly when `re` full-matches it against both.
+* An assertion inside `&` or `~` depends on surrounding context, which
+  per-operand truth loses. Lookaround recovers it: `P((A)&(B))` full-matches
+  exactly what `P(?=(?:A)$)(?:B)` does, evaluated at the real position in the
+  real string.
+
 A seeded generator keeps failures reproducible.
 """
 
@@ -15,27 +26,85 @@ from __future__ import annotations
 import itertools
 import random
 import re
+from collections.abc import Callable, Sequence
 
 import pytest
 
-from regexbench import Dialect, Semantics, Verdict, equivalent
+from regexbench import Dialect, EquivalenceResult, Semantics, Verdict, equivalent
+
+Matcher = Callable[[str], bool]
 
 ATOMS = ["a", "b", "c", "[ab]", "[^a]", r"\d", ".", "a|b", "(ab)", "[a-c]"]
 QUANTIFIERS = ["", "*", "+", "?", "{2}", "{1,2}"]
-ALPHABET = "abc1.\n"
 
-CORPUS = [""] + [
-    "".join(combo)
-    for length in (1, 2, 3)
-    for combo in itertools.product(ALPHABET, repeat=length)
-]
+# Zero-width assertions cannot be quantified: `\b*` is a syntax error in
+# modern `re`.
+ZERO_WIDTH = (r"\b", r"\B")
 
 
-def _random_pattern(rng: random.Random, depth: int = 0) -> str:
-    pattern = rng.choice(ATOMS) + rng.choice(QUANTIFIERS)
-    if depth < 2 and rng.random() < 0.5:
-        pattern += _random_pattern(rng, depth + 1)
-    return pattern
+def corpus(alphabet: str, longest: int = 3) -> list[str]:
+    """Every string up to `longest` characters over `alphabet`, plus ""."""
+    return [""] + [
+        "".join(combo)
+        for length in range(1, longest + 1)
+        for combo in itertools.product(alphabet, repeat=length)
+    ]
+
+
+def generator(atoms: Sequence[str]) -> Callable[[random.Random, int], str]:
+    """A seeded random pattern builder drawing from `atoms`."""
+
+    def build(rng: random.Random, depth: int = 0) -> str:
+        pattern = rng.choice(atoms)
+        if pattern not in ZERO_WIDTH:
+            pattern += rng.choice(QUANTIFIERS)
+        if depth < 2 and rng.random() < 0.5:
+            pattern += build(rng, depth + 1)
+        return pattern
+
+    return build
+
+
+def cross_check(
+    result: EquivalenceResult,
+    left: Matcher,
+    right: Matcher,
+    texts: Sequence[str],
+    label: str,
+) -> None:
+    """Assert a verdict against ground truth.
+
+    EQUIVALENT has to survive the whole corpus. DIFFERENT has to come with a
+    witness the ground truth agrees separates the two — which is the stronger
+    check, since it fails on a witness that is merely plausible.
+    """
+    if result.verdict is Verdict.EQUIVALENT:
+        for text in texts:
+            assert left(text) == right(text), (
+                f"claimed {label} are equal, but they differ on {text!r}"
+            )
+        return
+
+    witness = result.witness
+    assert witness is not None, f"{label}: DIFFERENT without a witness"
+    assert left(witness) != right(witness), (
+        f"claimed {label} differ with witness {witness!r}, but ground truth agrees on it"
+    )
+
+
+def matcher(pattern: re.Pattern[str], method: str = "fullmatch") -> Matcher:
+    return lambda text: getattr(pattern, method)(text) is not None
+
+
+def method_for(semantics: Semantics) -> str:
+    return "search" if semantics is Semantics.SEARCH else "fullmatch"
+
+
+# --------------------------------------------------------------------------
+# Plain full-match equivalence.
+
+PLAIN = generator(ATOMS)
+PLAIN_CORPUS = corpus("abc1.\n")
 
 
 @pytest.mark.parametrize("seed", range(8))
@@ -44,7 +113,7 @@ def test_verdicts_agree_with_the_re_module(seed: int) -> None:
     checked = 0
 
     for _ in range(150):
-        left, right = _random_pattern(rng), _random_pattern(rng)
+        left, right = PLAIN(rng), PLAIN(rng)
         try:
             compiled_left, compiled_right = re.compile(left), re.compile(right)
         except re.error:
@@ -54,39 +123,24 @@ def test_verdicts_agree_with_the_re_module(seed: int) -> None:
         if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
             continue
         checked += 1
-
-        same_on_corpus = all(
-            (compiled_left.fullmatch(s) is not None)
-            == (compiled_right.fullmatch(s) is not None)
-            for s in CORPUS
+        cross_check(
+            result,
+            matcher(compiled_left),
+            matcher(compiled_right),
+            PLAIN_CORPUS,
+            f"{left!r} and {right!r}",
         )
-
-        if result.verdict is Verdict.EQUIVALENT:
-            assert same_on_corpus, (
-                f"claimed {left!r} == {right!r}, but they differ on the corpus"
-            )
-        else:
-            witness = result.witness
-            assert witness is not None
-            in_left = compiled_left.fullmatch(witness) is not None
-            in_right = compiled_right.fullmatch(witness) is not None
-            assert in_left != in_right, (
-                f"claimed {left!r} != {right!r} with witness {witness!r}, "
-                f"but re says they agree on it"
-            )
 
     assert checked > 50, "generator produced too few analyzable pairs to be meaningful"
 
 
-SEARCH_CORPUS = [""] + [
-    "".join(combo)
-    for length in (1, 2, 3, 4)
-    for combo in itertools.product("abc1", repeat=length)
-]
+# --------------------------------------------------------------------------
+# Search semantics, where anchors are what the reduction has to respect.
+
+SEARCH_CORPUS = corpus("abc1", longest=4)
 
 
 def _anchored(rng: random.Random, pattern: str) -> str:
-    """Sometimes anchor a pattern, since anchors are what search has to respect."""
     roll = rng.random()
     if roll < 0.15:
         return "^" + pattern
@@ -101,16 +155,15 @@ def _anchored(rng: random.Random, pattern: str) -> str:
 def test_search_verdicts_agree_with_re_search(seed: int) -> None:
     """The search reduction rewrites `p` to `.*p.*` around whatever it anchors.
 
-    That rewrite is easy to get subtly wrong — a leading `^` binds to the
-    first branch of an alternation, not the whole pattern — so it is checked
-    against `re.search` the same way full-match equivalence is.
+    Easy to get subtly wrong — a leading `^` binds to the first branch of an
+    alternation, not the whole pattern — so it is checked against `re.search`.
     """
     rng = random.Random(seed)
     checked = 0
 
     for _ in range(120):
-        left = _anchored(rng, _random_pattern(rng))
-        right = _anchored(rng, _random_pattern(rng))
+        left = _anchored(rng, PLAIN(rng))
+        right = _anchored(rng, PLAIN(rng))
         try:
             compiled_left, compiled_right = re.compile(left), re.compile(right)
         except re.error:
@@ -120,39 +173,29 @@ def test_search_verdicts_agree_with_re_search(seed: int) -> None:
         if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
             continue
         checked += 1
-
-        if result.verdict is Verdict.EQUIVALENT:
-            for text in SEARCH_CORPUS:
-                assert (compiled_left.search(text) is not None) == (
-                    compiled_right.search(text) is not None
-                ), f"claimed searching {left!r} == {right!r}, but they differ on {text!r}"
-        else:
-            witness = result.witness
-            assert witness is not None
-            assert (compiled_left.search(witness) is not None) != (
-                compiled_right.search(witness) is not None
-            ), (
-                f"claimed searching {left!r} != {right!r} with witness "
-                f"{witness!r}, but re says they agree on it"
-            )
+        cross_check(
+            result,
+            matcher(compiled_left, "search"),
+            matcher(compiled_right, "search"),
+            SEARCH_CORPUS,
+            f"searching {left!r} and {right!r}",
+        )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
+
+
+# --------------------------------------------------------------------------
+# dk.brics operators, whose ground truth is computed per operand.
 
 
 @pytest.mark.parametrize("operator", ["&", "~"])
 @pytest.mark.parametrize("seed", range(3))
 def test_brics_operators_agree_with_re(operator: str, seed: int) -> None:
-    """`&` and `~` have no `re` equivalent, but their operands do.
-
-    So the ground truth is computed per operand — a string is in `(A)&(B)`
-    exactly when `re` full-matches it against both, and in `~(A)` exactly when
-    `re` does not match it at all — and the verdict is checked against that.
-    """
     rng = random.Random(seed)
     checked = 0
 
     for _ in range(120):
-        inner, other, candidate = (_random_pattern(rng) for _ in range(3))
+        inner, other, candidate = PLAIN(rng), PLAIN(rng), PLAIN(rng)
         try:
             compiled_inner = re.compile(inner)
             compiled_other = re.compile(other)
@@ -160,56 +203,45 @@ def test_brics_operators_agree_with_re(operator: str, seed: int) -> None:
         except re.error:
             continue
 
-        pattern = f"({inner})&({other})" if operator == "&" else f"~({inner})"
+        if operator == "&":
+            pattern = f"({inner})&({other})"
 
-        def in_pattern(
-            text: str,
-            first: re.Pattern[str] = compiled_inner,
-            second: re.Pattern[str] = compiled_other,
-            op: str = operator,
-        ) -> bool:
-            if op == "&":
+            def in_pattern(
+                text: str,
+                first: re.Pattern[str] = compiled_inner,
+                second: re.Pattern[str] = compiled_other,
+            ) -> bool:
                 return bool(first.fullmatch(text)) and bool(second.fullmatch(text))
-            return not first.fullmatch(text)
+        else:
+            pattern = f"~({inner})"
+
+            def in_pattern(
+                text: str,
+                first: re.Pattern[str] = compiled_inner,
+                second: re.Pattern[str] = compiled_other,
+            ) -> bool:
+                return not first.fullmatch(text)
 
         result = equivalent(pattern, candidate, dialect=Dialect.BRICS)
         if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
             continue
         checked += 1
-
-        if result.verdict is Verdict.EQUIVALENT:
-            for text in CORPUS:
-                assert in_pattern(text) == bool(compiled_candidate.fullmatch(text)), (
-                    f"claimed {pattern!r} == {candidate!r}, but they differ on {text!r}"
-                )
-        else:
-            witness = result.witness
-            assert witness is not None
-            assert in_pattern(witness) != bool(compiled_candidate.fullmatch(witness)), (
-                f"claimed {pattern!r} != {candidate!r} with witness {witness!r}, "
-                f"but re says they agree on it"
-            )
+        cross_check(
+            result,
+            in_pattern,
+            matcher(compiled_candidate),
+            PLAIN_CORPUS,
+            f"{pattern!r} and {candidate!r}",
+        )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
 
 
-BOUNDARY_ATOMS = [*ATOMS, r"\b", r"\B", r"\bx", r"x\b", r"\w"]
-BOUNDARY_ALPHABET = "ab1 _"
-BOUNDARY_CORPUS = [""] + [
-    "".join(combo)
-    for length in (1, 2, 3, 4)
-    for combo in itertools.product(BOUNDARY_ALPHABET, repeat=length)
-]
+# --------------------------------------------------------------------------
+# Word boundaries.
 
-
-def _boundary_pattern(rng: random.Random, depth: int = 0) -> str:
-    atom = rng.choice(BOUNDARY_ATOMS)
-    # Quantifying a zero-width assertion is a syntax error in modern `re`.
-    if atom not in (r"\b", r"\B"):
-        atom += rng.choice(QUANTIFIERS)
-    if depth < 2 and rng.random() < 0.5:
-        atom += _boundary_pattern(rng, depth + 1)
-    return atom
+BOUNDARY = generator([*ATOMS, r"\b", r"\B", r"\bx", r"x\b", r"\w"])
+BOUNDARY_CORPUS = corpus("ab1 _", longest=4)
 
 
 @pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
@@ -217,15 +249,15 @@ def _boundary_pattern(rng: random.Random, depth: int = 0) -> str:
 def test_word_boundaries_agree_with_re(seed: int, semantics: Semantics) -> None:
     """`\\b` is decided by splitting the alphabet and carrying one bit of state.
 
-    Both halves of that are easy to get subtly wrong — and `\\B` has a Python
-    quirk on the empty string — so every verdict is checked against `re`.
+    Both halves are easy to get subtly wrong, and `\\B` has a Python quirk on
+    the empty string, so every verdict is checked against `re`.
     """
     rng = random.Random(seed)
-    method = "search" if semantics is Semantics.SEARCH else "fullmatch"
+    method = method_for(semantics)
     checked = 0
 
     for _ in range(200):
-        left, right = _boundary_pattern(rng), _boundary_pattern(rng)
+        left, right = BOUNDARY(rng), BOUNDARY(rng)
         if "\\b" not in left + right and "\\B" not in left + right:
             continue
         try:
@@ -237,42 +269,34 @@ def test_word_boundaries_agree_with_re(seed: int, semantics: Semantics) -> None:
         if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
             continue
         checked += 1
-
-        def matches(compiled: re.Pattern[str], text: str) -> bool:
-            return getattr(compiled, method)(text) is not None
-
-        if result.verdict is Verdict.EQUIVALENT:
-            for text in BOUNDARY_CORPUS:
-                assert matches(compiled_left, text) == matches(compiled_right, text), (
-                    f"claimed {left!r} == {right!r} under {method}, "
-                    f"but they differ on {text!r}"
-                )
-        else:
-            witness = result.witness
-            assert witness is not None
-            assert matches(compiled_left, witness) != matches(compiled_right, witness), (
-                f"claimed {left!r} != {right!r} with witness {witness!r}, "
-                f"but re says they agree on it"
-            )
+        cross_check(
+            result,
+            matcher(compiled_left, method),
+            matcher(compiled_right, method),
+            BOUNDARY_CORPUS,
+            f"{method} of {left!r} and {right!r}",
+        )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
+
+
+# --------------------------------------------------------------------------
+# Assertions inside operators, where lookaround supplies the ground truth.
 
 
 @pytest.mark.parametrize("seed", range(2))
 def test_assertions_inside_brics_operators_agree_with_re(seed: int) -> None:
     """`&` and `~` determinize their operands, which bakes in a context.
 
-    Python has no intersection, but lookaround expresses one *with* the right
-    context: `P((A)&(B))` full-matches exactly what `P(?=(?:A)$)(?:B)` does,
-    and the lookahead is evaluated at the real position in the real string —
-    so a `\\b` inside A sees what the embedded sub-machine must see.
+    Lookaround expresses the same intersection *with* the right context, so a
+    `\\b` inside the operand sees what the embedded sub-machine must see.
     """
     rng = random.Random(seed)
     prefixes = ["", "x", "a", " ", "x*"]
     checked = 0
 
     for _ in range(500):
-        inner, other, candidate = (_boundary_pattern(rng) for _ in range(3))
+        inner, other, candidate = BOUNDARY(rng), BOUNDARY(rng), BOUNDARY(rng)
         prefix = rng.choice(prefixes)
         if rng.random() < 0.5:
             pattern = f"{prefix}(({inner})&({other}))"
@@ -290,63 +314,44 @@ def test_assertions_inside_brics_operators_agree_with_re(seed: int) -> None:
         if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
             continue
         checked += 1
-
-        if result.verdict is Verdict.EQUIVALENT:
-            for text in BOUNDARY_CORPUS:
-                assert (compiled_reference.fullmatch(text) is not None) == (
-                    compiled_candidate.fullmatch(text) is not None
-                ), f"claimed {pattern!r} == {candidate!r}, but they differ on {text!r}"
-        else:
-            witness = result.witness
-            assert witness is not None
-            assert (compiled_reference.fullmatch(witness) is not None) != (
-                compiled_candidate.fullmatch(witness) is not None
-            ), (
-                f"claimed {pattern!r} != {candidate!r} with witness {witness!r}, "
-                f"but re says they agree on it"
-            )
+        cross_check(
+            result,
+            matcher(compiled_reference),
+            matcher(compiled_candidate),
+            BOUNDARY_CORPUS,
+            f"{pattern!r} and {candidate!r}",
+        )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
 
 
-UNICODE_ATOMS = ["a", "1", "_", "[ab]", "[^a]", r"\d", r"\D", r"\w", r"\W", r"\s",
-                 r"\S", ".", "[0-9]", "[A-Za-z0-9_]", "a|1", "(a1)", r"\b", r"\B"]
+# --------------------------------------------------------------------------
+# Unicode-aware shorthand classes.
+
+UNICODE = generator(
+    ["a", "1", "_", "[ab]", "[^a]", r"\d", r"\D", r"\w", r"\W", r"\s", r"\S",
+     ".", "[0-9]", "[A-Za-z0-9_]", "a|1", "(a1)", r"\b", r"\B"]
+)
 # A digit, a letter, a space and a symbol from outside ASCII, alongside ASCII
-# ones: `\d` and `[0-9]` differ only on characters like ٣, so a corpus of ASCII
-# would call them equivalent and never notice.
-UNICODE_ALPHABET = "a1_ !٣é\xa0€\n"
-UNICODE_CORPUS = [""] + [
-    "".join(combo)
-    for length in (1, 2, 3)
-    for combo in itertools.product(UNICODE_ALPHABET, repeat=length)
-]
-
-
-def _unicode_pattern(rng: random.Random, depth: int = 0) -> str:
-    atom = rng.choice(UNICODE_ATOMS)
-    if atom not in (r"\b", r"\B"):
-        atom += rng.choice(QUANTIFIERS)
-    if depth < 2 and rng.random() < 0.5:
-        atom += _unicode_pattern(rng, depth + 1)
-    return atom
+# ones: `\d` and `[0-9]` differ only on characters like ٣, so an ASCII-only
+# corpus would call them equivalent and never notice. The newline matters too —
+# it is what catches a search reduction built from `.`, which excludes newlines
+# where `re.search` crosses them.
+UNICODE_CORPUS = corpus("a1_ !٣é\xa0€\n")
 
 
 @pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
 @pytest.mark.parametrize("seed", range(2))
-def test_shorthand_classes_agree_with_re_over_unicode(seed: int, semantics: Semantics) -> None:
-    """`\\d`, `\\w` and `\\s` are Unicode-aware in `re`, and must be here too.
-
-    The enumerated ASCII members keep witnesses readable; the rest of Unicode
-    is covered by class, since it cannot be enumerated and must not be dropped.
-    This corpus also carries a newline, which is what catches a search
-    reduction built from `.` — `re.search` crosses newlines and `.` does not.
-    """
+def test_shorthand_classes_agree_with_re_over_unicode(
+    seed: int, semantics: Semantics
+) -> None:
+    """`\\d`, `\\w` and `\\s` are Unicode-aware in `re`, and must be here too."""
     rng = random.Random(seed)
-    method = "search" if semantics is Semantics.SEARCH else "fullmatch"
+    method = method_for(semantics)
     checked = 0
 
     for _ in range(250):
-        left, right = _unicode_pattern(rng), _unicode_pattern(rng)
+        left, right = UNICODE(rng), UNICODE(rng)
         try:
             compiled_left, compiled_right = re.compile(left), re.compile(right)
         except re.error:
@@ -356,22 +361,12 @@ def test_shorthand_classes_agree_with_re_over_unicode(seed: int, semantics: Sema
         if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
             continue
         checked += 1
-
-        def matches(compiled: re.Pattern[str], text: str) -> bool:
-            return getattr(compiled, method)(text) is not None
-
-        if result.verdict is Verdict.EQUIVALENT:
-            for text in UNICODE_CORPUS:
-                assert matches(compiled_left, text) == matches(compiled_right, text), (
-                    f"claimed {left!r} == {right!r} under {method}, "
-                    f"but they differ on {text!r}"
-                )
-        else:
-            witness = result.witness
-            assert witness is not None
-            assert matches(compiled_left, witness) != matches(compiled_right, witness), (
-                f"claimed {left!r} != {right!r} with witness {witness!r}, "
-                f"but re says they agree on it"
-            )
+        cross_check(
+            result,
+            matcher(compiled_left, method),
+            matcher(compiled_right, method),
+            UNICODE_CORPUS,
+            f"{method} of {left!r} and {right!r}",
+        )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
