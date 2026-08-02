@@ -19,6 +19,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from ._parse import (
+    NEGATED_BOUNDARY_MATCHES_EMPTY,
     UNNAMED_DIGIT,
     UNNAMED_OTHER,
     UNNAMED_SPACE,
@@ -241,11 +242,11 @@ class _NFA:
         back rather than guessed at, and taken on the next transition once both
         sides are known.
 
-        `empty_subject` marks the one position in a zero-length string, where
-        Python refuses `\\B` even though no boundary exists there and `\\b`
-        fails too. That is a quirk rather than a consequence — most engines
-        match — but this package is scoring patterns that will be run by `re`,
-        so it models `re`.
+        `empty_subject` marks the one position in a zero-length string, which
+        is where the two boundary assertions stop being exact opposites — on
+        interpreters that refuse `\\B` there. CPython 3.14 stopped refusing it
+        (gh-124130), so which behaviour is right depends on the interpreter and
+        is probed rather than assumed.
         """
         stack = list(states)
         seen = set(states)
@@ -258,7 +259,7 @@ class _NFA:
                     passable = True
                 elif isinstance(on, Assert):
                     passable = boundary is not None and boundary != on.negated
-                    if on.negated and empty_subject:
+                    if on.negated and empty_subject and not NEGATED_BOUNDARY_MATCHES_EMPTY:
                         passable = False
                 elif isinstance(on, _Context):
                     passable = context is not None and context == (
