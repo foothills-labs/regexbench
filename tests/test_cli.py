@@ -37,7 +37,7 @@ def regexeval_file(tmp_path):
 
 class TestEq:
     def test_equivalent_patterns_exit_zero(self, capsys):
-        assert main(["eq", "[0-9]+", r"\d+"]) == 0
+        assert main(["eq", "[0-9]+", "[0-9][0-9]*"]) == 0
         assert "equivalent" in capsys.readouterr().out
 
     def test_different_patterns_exit_one_with_a_witness(self, capsys):

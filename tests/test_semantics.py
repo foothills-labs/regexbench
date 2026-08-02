@@ -67,7 +67,7 @@ def test_evaluate_uses_the_task_semantics_for_equivalence():
     task = Task(
         positives=["x123y"],
         negatives=["xy"],
-        reference=r"\d{3}",
+        reference=r"[0-9]{3}",
         semantics=Semantics.SEARCH,
     )
     report = evaluate("[0-9][0-9][0-9]", task)
@@ -78,16 +78,16 @@ def test_evaluate_uses_the_task_semantics_for_equivalence():
 
 def test_a_task_may_carry_a_reference_and_no_examples():
     # KB13 and NL-RX ship a gold pattern with no worked examples at all.
-    task = Task(reference=r"\d+")
+    task = Task(reference=r"[0-9]+")
     assert not task.has_examples
-    report = evaluate("[0-9]+", task)
+    report = evaluate("[0-9][0-9]*", task)
     assert report.correctness.total == 0
     assert report.equivalence.verdict is Verdict.EQUIVALENT
     assert report.usable, "equivalence alone establishes an example-free task"
 
 
 def test_an_example_free_task_that_differs_is_not_usable():
-    report = evaluate("[0-9]", Task(reference=r"\d+"))
+    report = evaluate("[0-9]", Task(reference=r"[0-9]+"))
     assert report.equivalence.verdict is Verdict.DIFFERENT
     assert not report.usable
 

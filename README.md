@@ -2,8 +2,8 @@
 
 **Evaluate a regex the way a benchmark should.**
 
-Scoring generated regular expressions by string comparison is wrong: `[0-9]+`
-and `\d+` are the same language and different strings. And a pattern that
+Scoring generated regular expressions by string comparison is wrong: `(ab)+`
+and `ab(ab)*` are the same language and different strings. And a pattern that
 passes every test can still hang a production server.
 
 `regexbench` answers the three questions that actually matter — is it the same
@@ -21,8 +21,8 @@ DFA-EQ metric used in the regex generation literature.
 ```python
 from regexbench import equivalent
 
-bool(equivalent(r"[0-9]+", r"\d+"))       # True
-bool(equivalent(r"(ab)+", r"ab(ab)*"))    # True
+bool(equivalent(r"(ab)+", r"ab(ab)*"))      # True
+bool(equivalent(r"[0-9]+", r"[0-9][0-9]*"))  # True
 
 result = equivalent(r"a+", r"a*")
 result.verdict     # <Verdict.DIFFERENT>
@@ -32,13 +32,31 @@ result.witness     # '' — the shortest string telling them apart
 Witnesses are shortest-first and real: every one is a string you can paste
 into `re.fullmatch` to see the difference yourself.
 
-**When it says it doesn't know.** Backreferences and lookaround make a pattern
-non-regular, and equivalence is then formally undecidable. Rather than guess,
-the verdict is `UNDECIDABLE`:
+**When it says it doesn't know.** Backreferences make a pattern non-regular,
+and equivalence is then formally undecidable. Rather than guess, the verdict is
+`UNDECIDABLE`:
 
 ```python
-equivalent(r"(a)\1", r"aa").verdict    # <Verdict.UNDECIDABLE>
+equivalent(r"(a)\1", r"aa").verdict     # <Verdict.UNDECIDABLE>
+equivalent(r"(?=a)ab", r"ab").verdict   # <Verdict.UNSUPPORTED>
 ```
+
+The two are kept apart on purpose. Lookaround *is* regular — it only escapes
+the regular languages when combined with backreferences — so refusing it is a
+statement about this engine, not about the problem. `UNDECIDABLE` means nothing
+can answer; `UNSUPPORTED` means this does not.
+
+**Shorthand classes follow `re`, which means Unicode.** `\d` matches every
+Unicode digit, so it is not `[0-9]`:
+
+```python
+equivalent(r"\d", "[0-9]").verdict     # <Verdict.DIFFERENT>
+equivalent(r"\d", "[0-9]").witness     # '٣'
+```
+
+That is pedantic and it is also what `re` does — and `check()` runs the real
+`re`, so an engine that called them equivalent would contradict the tool it
+lives in.
 
 ## Match semantics
 
@@ -146,10 +164,10 @@ task = Task(
     prompt="three digits, a hyphen, four digits",
     positives=["123-4567"],
     negatives=["123-456", "abc"],
-    reference=r"\d{3}-\d{4}",
+    reference=r"[0-9]{3}-[0-9]{4}",
 )
 
-report = evaluate(r"[0-9]{3}-[0-9]{4}", task)
+report = evaluate(r"[0-9][0-9][0-9]-[0-9]{4}", task)
 report.correctness.accuracy   # 1.0
 report.equivalence.verdict    # <Verdict.EQUIVALENT>
 report.usable                 # True — correct *and* safe

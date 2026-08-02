@@ -19,8 +19,10 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from ._parse import (
-    OTHER_NONWORD,
-    OTHER_WORD,
+    UNNAMED_DIGIT,
+    UNNAMED_OTHER,
+    UNNAMED_SPACE,
+    UNNAMED_WORD,
     Alternate,
     Assert,
     CharSet,
@@ -31,6 +33,7 @@ from ._parse import (
     Node,
     Repeat,
     Unsupported,
+    in_class,
     is_word_symbol,
     uses_assertions,
 )
@@ -43,6 +46,17 @@ _MAX_STATES = 20_000
 # of the string" implies the previous character is non-word, so there are three
 # rather than four.
 _CONTEXTS = ((False, True), (False, False), (True, False))
+
+
+def _sentinels_for(ch: str) -> tuple[str, ...]:
+    """Which sentinel an unnamed character falls under, most specific first."""
+    if in_class(ch, "d"):
+        return (UNNAMED_DIGIT, UNNAMED_WORD, UNNAMED_OTHER)
+    if in_class(ch, "w"):
+        return (UNNAMED_WORD, UNNAMED_OTHER)
+    if in_class(ch, "s"):
+        return (UNNAMED_SPACE, UNNAMED_OTHER)
+    return (UNNAMED_OTHER,)
 
 
 @dataclass(frozen=True)
@@ -280,10 +294,10 @@ class DFA:
             row = self.delta[state]
             if ch in row:
                 symbol = ch
-            elif is_word_symbol(ch) and OTHER_WORD in row:
-                symbol = OTHER_WORD
             else:
-                symbol = OTHER_NONWORD
+                symbol = next(
+                    (s for s in _sentinels_for(ch) if s in row), UNNAMED_OTHER
+                )
             state = self.delta[state][symbol]
         return state in self.accepting
 

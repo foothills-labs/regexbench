@@ -8,7 +8,7 @@ from regexbench import Dialect, Semantics, Verdict, equivalent, is_regular
 @pytest.mark.parametrize(
     "left,right",
     [
-        (r"[0-9]+", r"\d+"),
+        (r"[0-9]+", r"[0-9][0-9]*"),
         (r"abc", r"abc"),
         (r"a|b", r"[ab]"),
         (r"(ab)+", r"ab(ab)*"),
@@ -55,14 +55,25 @@ def test_different_pairs_report_a_real_witness(left, right):
     )
 
 
-@pytest.mark.parametrize(
-    "pattern",
-    [r"(a)\1", r"(?=a)b", r"(?!a)b", r"(?<=a)b", r"(?<!a)b"],
-)
-def test_non_regular_features_are_undecidable_not_guessed(pattern):
+@pytest.mark.parametrize("pattern", [r"(a)\1", r"a\1"])
+def test_backreferences_are_undecidable_not_guessed(pattern):
+    """Backreferences leave the regular languages, so equivalence is undecidable."""
     result = equivalent(pattern, r"a")
     assert result.verdict is Verdict.UNDECIDABLE
     assert not is_regular(pattern)
+
+
+@pytest.mark.parametrize("pattern", [r"(?=a)b", r"(?!a)b", r"(?<=a)b", r"(?<!a)b"])
+def test_lookaround_is_unsupported_not_undecidable(pattern):
+    """Lookaround alone preserves regularity — this is decidable, just unbuilt.
+
+    Only combining lookaround with backreferences escapes the regular
+    languages. Calling it undecidable would be a claim about the problem when
+    it is a statement about this engine.
+    """
+    result = equivalent(pattern, r"a")
+    assert result.verdict is Verdict.UNSUPPORTED
+    assert not is_regular(pattern), "not analyzable here, whatever the theory says"
 
 
 def test_undecidable_is_reported_for_either_side():
@@ -124,3 +135,30 @@ def test_an_intractable_intersection_is_refused_rather_than_attempted():
     result = equivalent(pattern, "x", dialect=Dialect.BRICS)
     assert result.verdict is Verdict.UNSUPPORTED
     assert "too many" in result.reason
+
+
+@pytest.mark.parametrize(
+    "left,right,witness",
+    [
+        (r"\d", "[0-9]", "٣"),
+        (r"\w", "[A-Za-z0-9_]", None),
+        (r"\s", "[ \t\n\r\f\v]", None),
+    ],
+)
+def test_shorthand_classes_are_unicode_aware(left, right, witness):
+    """`\\d` is not `[0-9]`, and `re` is the reason.
+
+    Python matches every Unicode digit with `\\d`, so the two are different
+    languages — and `check()` runs the real `re`, so an engine that called them
+    equivalent would disagree with the tool it lives in.
+    """
+    import re
+
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.DIFFERENT
+    assert result.witness is not None
+    assert (re.fullmatch(left, result.witness) is not None) != (
+        re.fullmatch(right, result.witness) is not None
+    ), f"witness {result.witness!r} does not reproduce the difference"
+    if witness is not None:
+        assert result.witness == witness

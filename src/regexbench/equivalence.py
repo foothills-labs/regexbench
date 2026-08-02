@@ -11,7 +11,15 @@ Equivalence is defined over **full matches**, matching `re.fullmatch`.
 from __future__ import annotations
 
 from ._automata import build_dfa, find_distinguishing_string
-from ._parse import OTHER_NONWORD, OTHER_WORD, NonRegular, Unsupported, parse
+from ._parse import (
+    UNNAMED_DIGIT,
+    UNNAMED_OTHER,
+    UNNAMED_SPACE,
+    UNNAMED_WORD,
+    NonRegular,
+    Unsupported,
+    parse,
+)
 from .types import Dialect, EquivalenceResult, Semantics, Verdict
 
 __all__ = ["equivalent", "is_regular"]
@@ -20,8 +28,15 @@ __all__ = ["equivalent", "is_regular"]
 # works as long as neither pattern mentions it — but the two sentinels mean
 # different things, so a word character must stand in for one and a non-word
 # character for the other, or a witness involving `\\b` would not reproduce.
-_WORD_FILLERS = "xyzabcXYZABC0123456789_defghijklmnopqrstuvwDEFGHIJKLMNOPQRSTUVW"
-_NONWORD_FILLERS = " !~.-+@#%^&*()[]{}<>/\\|:;\'\"`,?$\x01"
+# One candidate list per sentinel: a character in that class, ideally one a
+# reader recognises. Non-ASCII members matter — `\d` and `[0-9]` differ only on
+# characters like ٣, so a witness separating them has to be one.
+_FILLERS = {
+    UNNAMED_DIGIT: "٣٤۵",
+    UNNAMED_WORD: "xyzabcXYZ_defghijklmnopqrstuvwé",
+    UNNAMED_SPACE: " \t\xa0",
+    UNNAMED_OTHER: "!~.-+@#%^&*()[]{}<>/\\|:;\'\"`,?$€\x01",
+}
 
 
 def equivalent(
@@ -34,7 +49,8 @@ def equivalent(
     """Decide whether `left` and `right` match exactly the same strings.
 
     Returns UNDECIDABLE — not a guess — when either pattern uses
-    backreferences or lookaround, which put it outside the regular languages.
+    backreferences, which put it outside the regular languages. Lookaround
+    stays regular and comes back UNSUPPORTED instead: decidable, unimplemented.
 
     Under SEARCH semantics the question becomes "do these two patterns accept
     the same *subject strings* when searched", which is the right question for
@@ -67,15 +83,11 @@ def equivalent(
 
     named = left_chars | right_chars
     # A sentinel only earns a place in the alphabet if some character it could
-    # stand for is actually unnamed. `\\w` names every word character there is
-    # under this engine's ASCII model, and an OTHER_WORD with no member left to
-    # denote would produce witnesses that do not reproduce.
+    # stand for is actually unnamed — otherwise it would yield a witness that
+    # does not reproduce.
     alphabet = tuple(sorted(named))
     fillers: dict[str, str] = {}
-    for sentinel, candidates in (
-        (OTHER_WORD, _WORD_FILLERS),
-        (OTHER_NONWORD, _NONWORD_FILLERS),
-    ):
+    for sentinel, candidates in _FILLERS.items():
         filler = next((c for c in candidates if c not in named), None)
         if filler is not None:
             alphabet += (sentinel,)
