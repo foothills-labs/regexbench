@@ -60,7 +60,7 @@ from regexbench.datasets import load_regexeval
 
 tasks = load_regexeval("RegexEval.json")
 analyzable = sum(is_regular(t.reference, dialect=t.dialect) for t in tasks)
-print(f"{analyzable}/{len(tasks)}")     # 604/762 = 79.3%
+print(f"{analyzable}/{len(tasks)}")     # 629/762 = 82.5%
 ```
 
 | Corpus | References this engine can parse |
@@ -72,9 +72,8 @@ print(f"{analyzable}/{len(tasks)}")     # 604/762 = 79.3%
 Treat that as an **upper bound** on comparability rather than a guarantee. Both
 sides of a comparison contribute to the alphabet, so a reference that parses on
 its own can still exceed the determinization limit against a particular
-candidate — 604 of Re(gEx|DoS)Eval's references parse, and 590 survived being
-compared against themselves before reflexivity made that check trivial. The
-`undecided` count in an actual run is the number that applies to that run.
+candidate. The `undecided` count in an actual run is the number that applies
+to that run.
 
 `pass@1` moves between 99.9% and 100% run to run, and the cause is not the
 loader. One record, `regexeval/1660`, has a gold reference that is itself a
@@ -301,6 +300,18 @@ inferred from the data alone.
   2013 (KB13)** — <https://github.com/nicholaslocascio/deep-regex>. Corpus
   sizes confirmed: KB13 is 824 expert-written pairs, NL-RX-Turk 10,000
   crowdsourced ones.
+
+Two further points confirmed against sources rather than assumed:
+
+- **Lookaround preserves regularity.** Zero-width lookaround assertions do not
+  take a pattern outside the regular languages; only combining them with
+  backreferences does, which lands the class at NLOG. So `regexbench` reports
+  lookaround as UNSUPPORTED (decidable, unimplemented) rather than UNDECIDABLE.
+- **Python's shorthand classes are Unicode-aware for text patterns.** `\d`,
+  `\w`, `\s`, `\b` and `\B` match Unicode by default and only become
+  ASCII-only under `re.ASCII` — see the
+  [`re` documentation](https://docs.python.org/3/library/re.html). The engine
+  models the default, so `\d` and `[0-9]` are correctly different languages.
 
 One thing this document does **not** claim, because no source was found for it:
 how the reference tooling interprets `\b` in these corpora. The dk.brics grammar

@@ -13,24 +13,24 @@ equivalence is defined over full matches.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 
 from .types import Dialect, Semantics
 
 __all__ = ["parse", "Unsupported", "NonRegular", "Node"]
 
-# Sentinels standing for "a character not named anywhere in the patterns".
-#
-# There are two of them rather than one because `\b` can tell them apart. A
-# word boundary asks whether the characters either side of a position are word
-# characters, so an alphabet that lumps every unnamed character together cannot
-# answer it: `\bx` matches "!x" and not "ax", and both '!' and 'a' would be the
-# same symbol. Splitting the sentinel by word-ness keeps the alphabet finite
-# and still sound, because within each half the members remain indistinguishable
-# to both patterns.
-OTHER_WORD = "\x00OTHER_W"
-OTHER_NONWORD = "\x00OTHER_N"
-SENTINELS = (OTHER_WORD, OTHER_NONWORD)
+# Sentinels standing for "a character not named anywhere in the patterns",
+# one per class of unnamed character that a pattern can tell apart. `\\d` and
+# `[0-9]` are different languages in Python — `\\d` matches every Unicode digit,
+# `٣` included — so an alphabet that lumped all unnamed characters together
+# would report them equivalent. There is a sentinel per shorthand class for
+# that reason, and `\\b` needs the word/non-word split on top.
+UNNAMED_DIGIT = "\x00UNNAMED_D"
+UNNAMED_WORD = "\x00UNNAMED_W"
+UNNAMED_SPACE = "\x00UNNAMED_S"
+UNNAMED_OTHER = "\x00UNNAMED_O"
+SENTINELS = (UNNAMED_DIGIT, UNNAMED_WORD, UNNAMED_SPACE, UNNAMED_OTHER)
 
 _DIGITS = frozenset("0123456789")
 _WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -38,12 +38,25 @@ _SPACE = frozenset(" \t\n\r\f\v")
 
 
 def is_word_symbol(symbol: str) -> bool:
-    """Whether an alphabet symbol counts as a word character for `\\b`."""
-    if symbol == OTHER_WORD:
-        return True
-    if symbol == OTHER_NONWORD:
-        return False
-    return symbol in _WORD
+    """Whether an alphabet symbol counts as a word character for `\\b`.
+
+    Python defines `\\w` on text as "alphanumeric plus underscore", by the
+    Unicode definition of alphanumeric — so an accented letter is a word
+    character and `\\bé` matches "é".
+    """
+    if symbol in SENTINELS:
+        return symbol in (UNNAMED_DIGIT, UNNAMED_WORD)
+    return symbol.isalnum() or symbol == "_"
+
+
+def in_class(symbol: str, name: str) -> bool:
+    """Whether a concrete character belongs to shorthand class `name`."""
+    if name == "d":
+        return unicodedata.category(symbol) == "Nd"
+    if name == "w":
+        return symbol.isalnum() or symbol == "_"
+    return symbol.isspace()
+
 
 _CLASS_ESCAPES: dict[str, tuple[frozenset[str], bool]] = {
     "d": (_DIGITS, False),
@@ -86,13 +99,29 @@ class CharSet(Node):
 
     chars: frozenset[str]
     negated: bool = False
+    # Shorthand classes this set draws from — a subset of {"d", "w", "s"}. The
+    # enumerated `chars` cover their ASCII members so that witnesses stay
+    # readable; the class name covers the rest of Unicode, which cannot be
+    # enumerated and must not be silently dropped.
+    classes: frozenset[str] = frozenset()
 
     def accepts(self, symbol: str) -> bool:
         if symbol in SENTINELS:
-            # A sentinel stands for unnamed characters, so a positive set never
-            # contains it and a negated set always does.
-            return self.negated
-        return (symbol in self.chars) != self.negated
+            return self._covers_class(symbol) != self.negated
+        contains = symbol in self.chars or any(
+            in_class(symbol, name) for name in self.classes
+        )
+        return contains != self.negated
+
+    def _covers_class(self, sentinel: str) -> bool:
+        if sentinel == UNNAMED_DIGIT:
+            # Digits are word characters, so `\\w` covers them too.
+            return bool(self.classes & {"d", "w"})
+        if sentinel == UNNAMED_WORD:
+            return "w" in self.classes
+        if sentinel == UNNAMED_SPACE:
+            return "s" in self.classes
+        return False  # nothing shorthand covers "none of the above"
 
 
 @dataclass(frozen=True)
@@ -191,7 +220,10 @@ def any_char() -> CharSet:
 
 def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> Node:
     """Wrap `node` so full-matching it is the same as searching the original."""
-    any_run = Repeat(CharSet(frozenset("\n"), negated=True), 0, None)
+    # Truly any character, not `.` — `.` excludes newlines and `re.search`
+    # does not. Searching for "a" finds it in "\na", so a wrapper built from
+    # `.` would wrongly forbid the surrounding text from containing newlines.
+    any_run = Repeat(any_char(), 0, None)
 
     def wrap(inner: Node, prefix: bool, suffix: bool) -> Node:
         parts: list[Node] = []
@@ -375,7 +407,10 @@ class _Parser:
             if rest.startswith("?:"):
                 self.pos += 2
             elif rest.startswith(("?=", "?!", "?<=", "?<!")):
-                raise NonRegular("lookaround makes equivalence undecidable")
+                # Not NonRegular: lookaround alone preserves regularity, so
+                # this is decidable and merely unimplemented. Only combining it
+                # with backreferences escapes the regular languages.
+                raise Unsupported("lookaround is not supported")
             elif rest.startswith("?>"):
                 raise NonRegular("atomic groups are not supported")
             elif rest.startswith("?P<") or rest.startswith("?<"):
@@ -413,7 +448,7 @@ class _Parser:
         if ch in _CLASS_ESCAPES:
             chars, negated = _CLASS_ESCAPES[ch]
             self.literals.update(chars)
-            return CharSet(chars, negated=negated)
+            return CharSet(chars, negated=negated, classes=frozenset(ch.lower()))
         literal = _LITERAL_ESCAPES.get(ch, ch)
         self.literals.add(literal)
         return CharSet(frozenset(literal))
@@ -425,6 +460,7 @@ class _Parser:
             negated = True
 
         chars: set[str] = set()
+        classes: set[str] = set()
         first = True
         while True:
             ch = self.peek()
@@ -447,6 +483,7 @@ class _Parser:
                             f"negated class escape \\{esc} inside [...] is not supported"
                         )
                     chars.update(sub)
+                    classes.add(esc.lower())
                     continue
                 ch = _LITERAL_ESCAPES.get(esc, esc)
 
@@ -469,4 +506,4 @@ class _Parser:
                 chars.add(ch)
 
         self.literals.update(chars)
-        return CharSet(frozenset(chars), negated=negated)
+        return CharSet(frozenset(chars), negated=negated, classes=frozenset(classes))

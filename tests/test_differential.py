@@ -307,3 +307,71 @@ def test_assertions_inside_brics_operators_agree_with_re(seed: int) -> None:
             )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
+
+
+UNICODE_ATOMS = ["a", "1", "_", "[ab]", "[^a]", r"\d", r"\D", r"\w", r"\W", r"\s",
+                 r"\S", ".", "[0-9]", "[A-Za-z0-9_]", "a|1", "(a1)", r"\b", r"\B"]
+# A digit, a letter, a space and a symbol from outside ASCII, alongside ASCII
+# ones: `\d` and `[0-9]` differ only on characters like ٣, so a corpus of ASCII
+# would call them equivalent and never notice.
+UNICODE_ALPHABET = "a1_ !٣é\xa0€\n"
+UNICODE_CORPUS = [""] + [
+    "".join(combo)
+    for length in (1, 2, 3)
+    for combo in itertools.product(UNICODE_ALPHABET, repeat=length)
+]
+
+
+def _unicode_pattern(rng: random.Random, depth: int = 0) -> str:
+    atom = rng.choice(UNICODE_ATOMS)
+    if atom not in (r"\b", r"\B"):
+        atom += rng.choice(QUANTIFIERS)
+    if depth < 2 and rng.random() < 0.5:
+        atom += _unicode_pattern(rng, depth + 1)
+    return atom
+
+
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(2))
+def test_shorthand_classes_agree_with_re_over_unicode(seed: int, semantics: Semantics) -> None:
+    """`\\d`, `\\w` and `\\s` are Unicode-aware in `re`, and must be here too.
+
+    The enumerated ASCII members keep witnesses readable; the rest of Unicode
+    is covered by class, since it cannot be enumerated and must not be dropped.
+    This corpus also carries a newline, which is what catches a search
+    reduction built from `.` — `re.search` crosses newlines and `.` does not.
+    """
+    rng = random.Random(seed)
+    method = "search" if semantics is Semantics.SEARCH else "fullmatch"
+    checked = 0
+
+    for _ in range(250):
+        left, right = _unicode_pattern(rng), _unicode_pattern(rng)
+        try:
+            compiled_left, compiled_right = re.compile(left), re.compile(right)
+        except re.error:
+            continue
+
+        result = equivalent(left, right, semantics=semantics)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+
+        def matches(compiled: re.Pattern[str], text: str) -> bool:
+            return getattr(compiled, method)(text) is not None
+
+        if result.verdict is Verdict.EQUIVALENT:
+            for text in UNICODE_CORPUS:
+                assert matches(compiled_left, text) == matches(compiled_right, text), (
+                    f"claimed {left!r} == {right!r} under {method}, "
+                    f"but they differ on {text!r}"
+                )
+        else:
+            witness = result.witness
+            assert witness is not None
+            assert matches(compiled_left, witness) != matches(compiled_right, witness), (
+                f"claimed {left!r} != {right!r} with witness {witness!r}, "
+                f"but re says they agree on it"
+            )
+
+    assert checked > 40, "generator produced too few analyzable pairs to be meaningful"

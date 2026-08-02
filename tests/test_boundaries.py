@@ -81,15 +81,12 @@ class TestAlphabet:
             re.search("ab", witness) is not None
         ), f"witness {witness!r} does not reproduce the difference"
 
-    def test_patterns_naming_every_word_character_still_work(self):
-        # `\w` names all 63 of them, leaving no unnamed word character for the
-        # sentinel to stand for. It has to drop out rather than produce a
-        # witness that cannot reproduce.
-        assert equivalent(r"\w", r"[A-Za-z0-9_]").verdict is Verdict.EQUIVALENT
-        assert equivalent(r"\b\w", r"\w", semantics=SEARCH).verdict in (
-            Verdict.EQUIVALENT,
-            Verdict.DIFFERENT,
-        )
+    def test_shorthand_classes_reach_beyond_their_ascii_members(self):
+        # `\w` enumerates 63 ASCII characters and covers the rest of Unicode by
+        # class, so it is not `[A-Za-z0-9_]` — and the witness proves it.
+        result = equivalent(r"\w", r"[A-Za-z0-9_]")
+        assert result.verdict is Verdict.DIFFERENT
+        assert result.witness is not None and not result.witness.isascii()
 
 
 class TestInsideOperators:

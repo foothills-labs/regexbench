@@ -47,9 +47,9 @@ def test_evaluate_combines_all_three_axes():
     task = Task(
         positives=["123-4567"],
         negatives=["123-456", "abc"],
-        reference=r"\d{3}-\d{4}",
+        reference=r"[0-9]{3}-[0-9]{4}",
     )
-    report = evaluate(r"[0-9]{3}-[0-9]{4}", task)
+    report = evaluate(r"[0-9][0-9][0-9]-[0-9]{4}", task)
 
     assert report.correctness.perfect
     assert not report.safety.risk.is_vulnerable
@@ -87,11 +87,11 @@ def test_examples_do_not_overrule_a_proven_difference():
     assert report.equivalence.witness is not None
 
 
-def test_an_undecidable_comparison_does_not_condemn_a_passing_pattern():
+def test_an_unanswerable_comparison_does_not_condemn_a_passing_pattern():
     """UNSUPPORTED means the engine could not answer, not that the answer is no."""
     task = Task(positives=["ab"], negatives=["ba"], reference=r"(?=a)ab")
     report = evaluate("ab", task)
 
-    assert report.equivalence.verdict is Verdict.UNDECIDABLE
+    assert report.equivalence.verdict is Verdict.UNSUPPORTED
     assert report.correctness.perfect
     assert report.usable, "examples are the evidence left when equivalence cannot answer"

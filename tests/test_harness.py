@@ -37,21 +37,21 @@ def digits_task(name: str = "digits") -> Task:
     return Task(
         positives=["123"],
         negatives=["abc"],
-        reference=r"\d+",
+        reference=r"[0-9]+",
         name=name,
     )
 
 
 class TestRun:
     def test_predictions_can_be_aligned_by_position(self):
-        report = run([digits_task()], [r"[0-9]+"])
+        report = run([digits_task()], [r"[0-9][0-9]*"])
         assert report.tasks == 1
         assert report.answered == 1
         assert report.dfa_eq_at(1) == 1.0
 
     def test_predictions_can_be_keyed_by_task_name(self):
         tasks = [digits_task("a"), digits_task("b")]
-        report = run(tasks, {"b": r"[0-9]+", "a": r"\d+"})
+        report = run(tasks, {"b": r"[0-9][0-9]*", "a": r"[0-9]+"})
         assert report.dfa_eq_at(1) == 1.0
 
     def test_a_task_with_no_prediction_stays_in_the_denominator(self):
@@ -75,7 +75,7 @@ class TestRun:
 
     def test_several_samples_per_task(self):
         # Two of four candidates are right, so pass@1 is 50%.
-        report = run([digits_task()], [[r"\d+", r"[0-9]+", "nope", "[a-z]+"]])
+        report = run([digits_task()], [[r"[0-9]+", r"[0-9][0-9]*", "nope", "[a-z]+"]])
         assert report.pass_at(1) == pytest.approx(0.5)
         assert report.pass_at(4) == pytest.approx(1.0)
 
@@ -83,14 +83,14 @@ class TestRun:
 class TestMetrics:
     def test_exact_match_understates_what_dfa_eq_measures(self):
         """The headline claim of the package, as a number."""
-        report = run([digits_task()], [r"[0-9]+"])
+        report = run([digits_task()], [r"[0-9][0-9]*"])
         assert report.exact_at(1) == 0.0
         assert report.dfa_eq_at(1) == 1.0
 
     def test_a_metric_with_no_qualifying_task_is_none_not_zero(self):
         # KB13-shaped: a reference, no examples. pass@k is not answerable.
-        task = Task(reference=r"\d+", name="eq-only")
-        report = run([task], [r"[0-9]+"])
+        task = Task(reference=r"[0-9]+", name="eq-only")
+        report = run([task], [r"[0-9][0-9]*"])
         assert report.pass_at(1) is None
         assert report.dfa_eq_at(1) == 1.0
 
@@ -119,7 +119,7 @@ class TestMetrics:
         task = Task(
             positives=["x123y"],
             negatives=["xy"],
-            reference=r"\d{3}",
+            reference=r"[0-9]{3}",
             name="s",
             semantics=Semantics.SEARCH,
         )
@@ -131,13 +131,13 @@ class TestMetrics:
 class TestResilience:
     def test_one_bad_pattern_does_not_abort_the_sweep(self):
         tasks = [digits_task("a"), digits_task("b")]
-        report = run(tasks, {"a": "(unclosed", "b": r"[0-9]+"})
+        report = run(tasks, {"a": "(unclosed", "b": r"[0-9][0-9]*"})
         assert report.tasks == 2
         assert report.dfa_eq_at(1) == pytest.approx(0.5)
 
     def test_workers_do_not_change_the_answer(self):
         tasks = [digits_task(f"t{i}") for i in range(6)]
-        predictions = [r"[0-9]+" if i % 2 else "nope" for i in range(6)]
+        predictions = [r"[0-9][0-9]*" if i % 2 else "nope" for i in range(6)]
         serial = run(tasks, predictions)
         parallel = run(tasks, predictions, workers=4)
         assert serial.summary() == parallel.summary()
@@ -154,14 +154,14 @@ class TestResilience:
 
 class TestPresentation:
     def test_summary_is_plain_data(self):
-        report = run([digits_task()], [r"[0-9]+"], name="my-model")
+        report = run([digits_task()], [r"[0-9][0-9]*"], name="my-model")
         summary = report.summary(ks=(1,))
         assert summary["name"] == "my-model"
         assert summary["tasks"] == 1
         assert summary["metrics"]["dfa-eq@1"] == 1.0
 
     def test_table_marks_unanswerable_metrics_as_not_applicable(self):
-        report = run([Task(reference=r"\d+", name="eq-only")], [r"[0-9]+"])
+        report = run([Task(reference=r"[0-9]+", name="eq-only")], [r"[0-9][0-9]*"])
         table = report.table()
         assert "n/a" in table, "pass@1 is undefined here and must not read as 0%"
         assert "dfa-eq@1" in table
@@ -177,19 +177,19 @@ class TestDecidedSubset:
     def test_the_two_dfa_eq_readings_differ_by_the_undecidable_tasks(self):
         """A flawless model, half of whose tasks the engine cannot analyze."""
         tasks = [
-            Task(reference=r"\d+", name="ok1"),
-            Task(reference=r"\d+", name="ok2"),
+            Task(reference=r"[0-9]+", name="ok1"),
+            Task(reference=r"[0-9]+", name="ok2"),
             Task(reference=r"(a)\1", name="undecidable1"),
             Task(reference=r"(a)\1", name="undecidable2"),
         ]
-        report = run(tasks, [r"[0-9]+", r"[0-9]+", r"(b)\1", r"(b)\1"])
+        report = run(tasks, [r"[0-9][0-9]*", r"[0-9][0-9]*", r"(b)\1", r"(b)\1"])
 
         assert report.undecided == 2
         assert report.dfa_eq_at(1) == pytest.approx(0.5), "whole corpus: a lower bound"
         assert report.dfa_eq_decided_at(1) == 1.0, "decidable subset: the model was perfect"
 
     def test_both_readings_agree_when_everything_is_decidable(self):
-        report = run([digits_task()], [r"[0-9]+"])
+        report = run([digits_task()], [r"[0-9][0-9]*"])
         assert report.dfa_eq_at(1) == report.dfa_eq_decided_at(1) == 1.0
 
     def test_the_decided_reading_is_none_when_nothing_is_decidable(self):
@@ -199,7 +199,7 @@ class TestDecidedSubset:
 
     def test_the_table_labels_which_reading_is_which(self):
         tasks = [Task(reference=r"\d+", name="ok"), Task(reference=r"(a)\1", name="no")]
-        table = run(tasks, [r"[0-9]+", r"(a)\1"]).table()
+        table = run(tasks, [r"[0-9][0-9]*", r"(a)\1"]).table()
         assert "dfa-eq@1 (decided)" in table
         assert "whole corpus" in table
         assert "model only" in table
