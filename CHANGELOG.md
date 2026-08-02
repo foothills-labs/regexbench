@@ -7,6 +7,16 @@ that a 0.x line makes no stability promise.
 
 ## 0.2.0 — unreleased
 
+### Known limitations
+
+- **Python 3.13 and below.** CPython 3.14 changed `\B` to match the empty
+  string ([gh-124130](https://github.com/python/cpython/issues/124130)), so it
+  is now always the opposite of `\b`. This engine still models the older
+  behaviour, and its own differential tests catch the disagreement — 13 of them
+  fail on 3.14. Making the boundary model version-aware is the fix; until then
+  3.14 is not claimed.
+
+
 First published release. 0.1.0 existed as a git tag's worth of code and was
 never uploaded, so everything below is new to anyone installing this.
 
