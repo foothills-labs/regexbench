@@ -38,7 +38,9 @@ Documentation = "https://github.com/foothills-labs/regexbench/blob/main/docs/ben
 Changelog = "https://github.com/foothills-labs/regexbench/blob/main/CHANGELOG.md"
 
 [build-system]
-requires = ["hatchling"]
+# hatchling 1.27 is the floor for PEP 639: below it, `license = "Apache-2.0"`
+# is not read as an SPDX expression and the wheel gets Metadata 2.1.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
