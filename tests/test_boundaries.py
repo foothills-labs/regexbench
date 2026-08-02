@@ -40,23 +40,29 @@ class TestBasics:
         assert equivalent(r"a\bb", "#", dialect=BRICS).verdict is Verdict.EQUIVALENT
         assert equivalent(r"a\Bb", "ab").verdict is Verdict.EQUIVALENT
 
-    def test_the_empty_string_is_pythons_special_case(self):
-        """`\\B` does not match "" in Python, though no boundary exists there.
+    def test_the_empty_string_follows_the_running_interpreter(self):
+        """The empty string is where `\\B` and `\\b` stop being exact opposites.
 
-        A quirk rather than a consequence — most engines match — but patterns
-        scored here are run by `re`, so `re` is what gets modelled.
+        Or rather, where they used to. CPython 3.14 made `\\B` match "", so
+        which behaviour is correct depends on the interpreter — and patterns
+        scored here are run by that interpreter's `re`, so it is the authority.
+        `\\B` consumes nothing, so under a full match "" is the only string it
+        could ever accept: it is either exactly the empty string, or the empty
+        language, and nothing in between.
         """
         import re
 
-        assert re.fullmatch(r"\B", "") is None
-        # `\B` consumes nothing, so under full match the empty string is the
-        # only thing it could accept — and it does not. It is the empty
-        # language, not the empty string.
-        assert equivalent(r"\B", "#", dialect=BRICS).verdict is Verdict.EQUIVALENT
-        differs = equivalent(r"\B", "")
-        assert differs.verdict is Verdict.DIFFERENT
-        assert differs.witness == "", "the empty string is exactly what separates them"
-        # ...and `\B` still holds between two non-word characters.
+        matches_empty = re.fullmatch(r"\B", "") is not None
+
+        if matches_empty:  # CPython 3.14 and later
+            assert equivalent(r"\B", "").verdict is Verdict.EQUIVALENT
+        else:  # CPython 3.13 and earlier
+            assert equivalent(r"\B", "#", dialect=BRICS).verdict is Verdict.EQUIVALENT
+            differs = equivalent(r"\B", "")
+            assert differs.verdict is Verdict.DIFFERENT
+            assert differs.witness == "", "the empty string is exactly what separates them"
+
+        # Either way, `\B` still holds between two non-word characters.
         assert equivalent(r" \B ", "  ").verdict is Verdict.EQUIVALENT
 
 
