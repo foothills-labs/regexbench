@@ -9,10 +9,6 @@ passes every test can still hang a production server.
 `regexbench` answers the three questions that actually matter — is it the same
 language, does it behave, and is it safe to run.
 
-```bash
-pip install regexbench
-```
-
 ## Semantic equivalence
 
 Both patterns compile to DFAs and the automata are compared, which is the
@@ -282,12 +278,40 @@ using words ending in 'er'", which the literal reading does not describe.
 empty string, which `re` refuses even though no boundary exists there. Patterns
 scored here are run by `re`, so `re` is what gets modelled.
 
-Correctness scoring and ReDoS screening have no such limit — they run the real
-`re` engine and work on any pattern it compiles.
+## Install
+
+```bash
+pip install regexbench
+```
+
+Python 3.10+. **No runtime dependencies** — stdlib only, deliberately, so this
+drops into a training or CI pipeline without dragging anything with it.
 
 ## Status
 
-Alpha. The API will change. Stdlib only, no dependencies.
+Alpha: the API will change, and the version is 0.x for that reason. What is
+stable is the discipline — every number in this README and in
+[docs/benchmarks.md](docs/benchmarks.md) came from a run, and the equivalence
+engine is differential-tested against Python's own `re` on every release.
+
+Known limits, in the order they cost you coverage:
+
+| Construct | Status |
+| --- | --- |
+| `^` / `$` away from the pattern ends | `UNSUPPORTED` — decidable, not built. 10.5% of Re(gEx|DoS)Eval |
+| Lookaround | `UNSUPPORTED` — regular, not built. 5.5% of Re(gEx|DoS)Eval |
+| Backreferences | `UNDECIDABLE` — no engine can answer this |
+| Possessive quantifiers, atomic groups | `UNSUPPORTED` |
+
+Correctness scoring and ReDoS screening have no such limit — they run the real
+`re` engine and work on any pattern it compiles.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: a wrong answer is
+worse than no answer, so anything the engine cannot decide has to say so.
+
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
