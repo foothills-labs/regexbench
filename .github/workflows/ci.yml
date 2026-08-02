@@ -2,11 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
 
+# A branch and its pull request share a group, so opening a PR does not run
+# the same commit twice.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
