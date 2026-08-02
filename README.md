@@ -236,7 +236,7 @@ result at all, but the `\b` gap in this engine.
 ## CLI
 
 ```bash
-regexbench eq '[0-9]+' '\d+'                # equivalent
+regexbench eq '[0-9]+' '[0-9][0-9]*'        # equivalent
 regexbench eq --search 'a' '.*a.*'          # equivalent
 regexbench eq --brics '([0-9])&([0-4])' '[0-4]'
 regexbench safety '(a+)+'                   # exponential

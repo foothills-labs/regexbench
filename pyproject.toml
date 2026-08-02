@@ -48,8 +48,10 @@ packages = ["src/regexbench"]
 include = ["src", "tests", "docs", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "--strict-markers"
+# Collect the package too, so the README-facing examples in docstrings are
+# executed. A doctest that drifts from the code is documentation that lies.
+testpaths = ["tests", "src"]
+addopts = "--strict-markers --doctest-modules"
 
 [tool.ruff]
 line-length = 100
