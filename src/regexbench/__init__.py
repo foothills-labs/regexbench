@@ -4,7 +4,7 @@ Three things a generated pattern has to survive, none of which string
 comparison can tell you:
 
     >>> from regexbench import equivalent, screen, check, Task
-    >>> bool(equivalent(r"[0-9]+", r"\\d+"))          # same language
+    >>> bool(equivalent(r"[0-9]+", r"[0-9][0-9]*"))    # same language
     True
     >>> screen(r"(a+)+$").risk.is_vulnerable          # ReDoS
     True
