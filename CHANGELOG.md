@@ -43,10 +43,22 @@ that a 0.x line makes no stability promise.
 - **`(?P=name)` is `UNDECIDABLE`, not `UNSUPPORTED`.** It is a backreference,
   and the documented taxonomy has said so all along.
 
-- **Bounded repeats are screened as polynomial.** `(a+){2}` was reported
-  exponential; it is not. `(a+){10}` is not safe either — it takes seconds on a
-  few dozen characters — so both now report `POLYNOMIAL`, and a bounded repeat
-  over an unambiguous body like `(ab){10}` stays `SAFE`.
+- **ReDoS screening reads repeat *width*, not just unboundedness.** `(a+){2}`
+  was reported exponential; it is not. `(a+){10}` is not safe either — it takes
+  seconds on a few dozen characters — so both now report `POLYNOMIAL`, while a
+  bounded repeat over an unambiguous body like `(ab){10}` stays `SAFE`.
+
+  What makes a body expensive to split is that it matches more than one
+  *width*, which unboundedness only approximates. `^([1-9][0-9]{0,7})+$` hangs
+  on two dozen characters with no unbounded repeat anywhere in it, and a run of
+  single optionals does the same — `^((\.)?([\w-]?)(\.)?)+$` gives the outer
+  `+` combinatorially many ways to divide one string. Both are now caught. A
+  lone `\d?` is not: `(\d?)*` varies by one optional character and CPython's
+  empty-loop guard keeps it linear.
+
+  Measured over the Re(gEx|DoS)Eval references, this moves 26 patterns off
+  `EXPONENTIAL` to `SAFE` — none of which blow up when probed — and finds two
+  that were called `SAFE` and do.
 
 - **`positives` and `negatives` must be lists of strings.** `"abc"` was
   silently accepted and became `["a", "b", "c"]`.
