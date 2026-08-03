@@ -46,7 +46,7 @@ Scoring the corpus against itself — `--use-reference` — gives:
 | --- | --- | --- |
 | `pass@1` | 99.9–100% | the references pass their own tests, so the corpus is loaded correctly |
 | `dfa-eq@1` | 100% | reflexivity — identical patterns, no automaton consulted |
-| `vulnerable@1` | 14.2% | 108 of the corpus's own reference expressions are ReDoS-vulnerable |
+| `vulnerable@1` | 12.7% | 97 of the corpus's own reference expressions are ReDoS-vulnerable |
 
 `dfa-eq@1` of 100% here is not a coverage measurement. Identical text denotes
 identical languages, so `equivalent()` short-circuits before parsing — which is
@@ -59,15 +59,24 @@ from regexbench import is_regular
 from regexbench.datasets import load_regexeval
 
 tasks = load_regexeval("RegexEval.json")
-analyzable = sum(is_regular(t.reference, dialect=t.dialect) for t in tasks)
-print(f"{analyzable}/{len(tasks)}")     # 707/762 = 92.8%
+analyzable = sum(
+    is_regular(t.reference, semantics=t.semantics, dialect=t.dialect) for t in tasks
+)
+print(f"{analyzable}/{len(tasks)}")     # 629/762 = 82.5%
 ```
 
 | Corpus | References this engine can parse |
 | --- | --- |
-| Re(gEx|DoS)Eval | 92.8% |
+| Re(gEx|DoS)Eval | 82.5% |
 | KB13 | 100% |
 | NL-RX-Synth / NL-RX-Turk | 100% |
+
+**Pass the corpus's own `semantics`.** It changes the answer, and the default
+flatters this corpus: 705 of the 762 references parse under FULLMATCH (92.5%)
+but only 629 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The
+difference is the 10.4% that anchor away from the pattern ends — resolved
+exactly under a full match, refused under a search, where the `.*p.*` rewrite
+has nowhere to put them.
 
 Treat that as an **upper bound** on comparability rather than a guarantee. Both
 sides of a comparison contribute to the alphabet, so a reference that parses on
@@ -88,7 +97,7 @@ tasks means a vulnerable gold pattern raced the timeout.
 
 The `vulnerable@1` row is a property of the dataset rather than of this tool,
 and is roughly the point the paper is making — `regexeval/1660` above is one of
-the 108.
+the 97.
 
 ---
 
@@ -194,11 +203,16 @@ number cannot answer both:
   what we could check, how much was correct" — the model on its own, blind to
   engine coverage.
 
-KB13 makes the spread concrete: only 51.1% of its references can be analyzed
-at all, so on the other 48.9% every candidate that is not textually identical
-comes back undecidable and scores zero under the first reading. Watch both, and
-treat a gap between them as a statement about this engine rather than about
-whatever you are scoring.
+Re(gEx|DoS)Eval makes the spread concrete: 82.5% of its references parse under
+the search semantics it is scored with, so on the other 17.5% every candidate
+that is not textually identical comes back undecidable and scores zero under
+the first reading. Watch both, and treat a gap between them as a statement
+about this engine rather than about whatever you are scoring.
+
+KB13 used to be the example here, when word boundaries were refused and only
+51.1% of it could be analyzed. All three dk.brics corpora now parse in full,
+so the spread there comes from a run's `undecided` count rather than from
+anything refused up front.
 
 `exact` is reported for contrast: where equivalence is decidable, `dfa-eq`
 above `exact` is the share of answers that are right and would be marked wrong
@@ -219,6 +233,17 @@ Measured on Re(gEx|DoS)Eval, one candidate costs about **75 ms**, split:
 | ReDoS screening | 54 ms | one child process per probe length |
 | Example scoring | 18 ms | one child process for the whole batch |
 | Equivalence | 4 ms | no subprocess at all |
+
+**That equivalence figure is a `--use-reference` figure**, and `--use-reference`
+compares each pattern with itself, so `equivalent()` short-circuits on
+identical text and never builds an automaton. Against candidates that actually
+differ, the same corpus measures a median of **0.3 ms** and a mean of
+**191 ms** — the mean is the whole story, because the distribution has a long
+tail and the slowest single comparison took **13.6 s**. The expensive ones are
+wide alternations over large alphabets: date formats spelling out every month,
+or VAT numbers spelling out every country code.
+
+Budget from the mean, not the median, and use `--workers`.
 
 Screening dominates, and it is the part that has to start processes: the only
 way to know a pattern hangs is to run it somewhere killable. A `--use-reference`
@@ -242,7 +267,7 @@ answering is cheaper than answering. Use `--workers`.
 Vulnerable candidates cost more, and unavoidably so: confirming a hang means
 waiting out the timeout, once per example. A candidate that hangs on all 25 of
 a task's examples costs 25 seconds at the default one-second budget. That is
-not a rare case — 14.2% of the corpus's own references are vulnerable, so a
+not a rare case — 12.7% of the corpus's own references are vulnerable, so a
 model trained on this kind of data will produce plenty.
 
 Two levers:

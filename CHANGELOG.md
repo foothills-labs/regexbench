@@ -63,6 +63,16 @@ that a 0.x line makes no stability promise.
 - **`positives` and `negatives` must be lists of strings.** `"abc"` was
   silently accepted and became `["a", "b", "c"]`.
 
+- **Anchor resolution no longer expands without bound.** Deciding which part of
+  a concatenation carries an anchor multiplies through nested concatenations,
+  so Re(gEx|DoS)Eval's reference 2284 — fifteen alternations inside `^...$` —
+  turned 98 nodes into 48 million and never finished. It stalled a whole
+  `--use-reference` run, because the structural ReDoS pass parses in-process
+  with no timeout. The traversal is now memoised on the node and the two
+  nullability flags, and the expansion is capped and refused past a node
+  budget, the way the automata layer already caps states. That pattern now
+  answers in 0.2s, and the whole corpus parses in 1.7s.
+
 - **Word boundaries on CPython 3.14.** 3.14 changed `\B` to match the empty
   string ([gh-124130](https://github.com/python/cpython/issues/124130)), making
   it exactly the negation of `\b`; 3.13 and earlier refuse it there, which made
@@ -84,11 +94,21 @@ that a 0.x line makes no stability promise.
   of them is why the anchor and escape families shipped at all: a generator
   that cannot emit a construct is not evidence about it.
 
+- **`is_regular()` takes `semantics`.** The answer depends on it — an anchor
+  away from the pattern ends resolves under FULLMATCH and is refused under
+  SEARCH — so a coverage count taken with the default overstates what the
+  engine will decide for a search corpus.
+
 ### Changed
 
-- **RegexEval references the engine can parse: 629/762 to 707/762.** The anchor
-  work closed the mid-pattern `^`/`$` gap, which was the largest single limit
-  on coverage.
+- **Benchmark numbers re-measured against the published corpora.** The
+  `vulnerable@1` row for Re(gEx|DoS)Eval moves from 14.2% to 12.7% (97 of 762)
+  with the screening fixes above. Coverage of that corpus stays at 629/762
+  under the search semantics it is scored with — the anchor work raises the
+  FULLMATCH figure to 705/762, but Re(gEx|DoS)Eval is a search corpus, and the
+  docs previously quoted the full-match number for it. The stale claim that
+  only 51.1% of KB13 is analyzable is gone; all three dk.brics corpora parse in
+  full, 20,824 patterns.
 
 ## 0.2.0 — 2026-08-02
 

@@ -367,6 +367,41 @@ def _contains_anchor(node: Node) -> bool:
     return False
 
 
+# Resolving an anchor inside a concatenation enumerates which part carries it,
+# and nested concatenations multiply those choices. RegexEval's reference 2284
+# is fifteen alternations deep inside `^...$` and expands 98 nodes into 48
+# million — so the expansion is capped and refused, the same way the automata
+# layer caps states rather than grinding on a pattern it cannot finish.
+_MAX_RESOLVED_NODES = 200_000
+
+
+class _ResolveState:
+    """Memo tables for one `_resolve_anchors` call, plus the size budget."""
+
+    __slots__ = ("memo", "sizes")
+
+    def __init__(self) -> None:
+        self.memo: dict[tuple[int, bool, bool], tuple[Node, bool]] = {}
+        self.sizes: dict[int, int] = {}
+
+
+def _node_count(node: Node, sizes: dict[int, int]) -> int:
+    """Nodes in `node`, memoised on identity so shared subtrees cost once."""
+    hit = sizes.get(id(node))
+    if hit is not None:
+        return hit
+    if isinstance(node, (Concat, Intersect)):
+        total = 1 + sum(_node_count(p, sizes) for p in node.parts)
+    elif isinstance(node, Alternate):
+        total = 1 + sum(_node_count(o, sizes) for o in node.options)
+    elif isinstance(node, (Repeat, Complement, Atomic, Poss)):
+        total = 1 + _node_count(node.node, sizes)
+    else:
+        total = 1
+    sizes[id(node)] = total
+    return total
+
+
 def _resolve_anchors(
     node: Node, *, prefix_nullable: bool, suffix_nullable: bool
 ) -> tuple[Node, bool]:
@@ -393,6 +428,40 @@ def _resolve_anchors(
     Returns the resolved node and whether any anchor survived it (resolved
     to the identity rather than to the empty language).
     """
+    return _resolve_cached(node, prefix_nullable, suffix_nullable, _ResolveState())
+
+
+def _resolve_cached(
+    node: Node,
+    prefix_nullable: bool,
+    suffix_nullable: bool,
+    cache: _ResolveState,
+) -> tuple[Node, bool]:
+    """`_resolve_impl` memoised on the node and the two flags.
+
+    A concatenation resolves each of its parts in up to six contexts, so a
+    plain recursion costs six to the nesting depth: RegexEval's reference 2284
+    is fifteen alternations deep inside `^...$` and did not finish in minutes.
+    There are only four flag combinations and the tree is finite, so caching
+    on identity bounds the whole traversal to four visits per node.
+    """
+    key = (id(node), prefix_nullable, suffix_nullable)
+    hit = cache.memo.get(key)
+    if hit is not None:
+        return hit
+    result = _resolve_impl(node, prefix_nullable, suffix_nullable, cache)
+    if _node_count(result[0], cache.sizes) > _MAX_RESOLVED_NODES:
+        raise Unsupported("resolving anchors expands the pattern past the node budget")
+    cache.memo[key] = result
+    return result
+
+
+def _resolve_impl(
+    node: Node,
+    prefix_nullable: bool,
+    suffix_nullable: bool,
+    cache: _ResolveState,
+) -> tuple[Node, bool]:
     if isinstance(node, Anchor):
         holds = prefix_nullable if node.is_start else suffix_nullable
         if holds:
@@ -402,16 +471,12 @@ def _resolve_anchors(
         options = []
         held = False
         for option in node.options:
-            resolved, survived = _resolve_anchors(
-                option, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
-            )
+            resolved, survived = _resolve_cached(option, prefix_nullable, suffix_nullable, cache)
             options.append(resolved)
             held = held or survived
         return Alternate(tuple(options)), held
     if isinstance(node, Repeat):
-        inner, held = _resolve_anchors(
-            node.node, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
-        )
+        inner, held = _resolve_cached(node.node, prefix_nullable, suffix_nullable, cache)
         if not _contains_anchor(node.node) or not held:
             return Repeat(inner, node.minimum, node.maximum), held
         if node.maximum == 0:
@@ -420,13 +485,9 @@ def _resolve_anchors(
         # (every earlier one matches the empty string) and the `$`-bearing
         # one last. Non-empty iterations can therefore only appear as the
         # single iteration, or as a first/middle/last triple.
-        head, _ = _resolve_anchors(
-            node.node, prefix_nullable=prefix_nullable, suffix_nullable=False
-        )
-        mid, _ = _resolve_anchors(node.node, prefix_nullable=False, suffix_nullable=False)
-        tail, _ = _resolve_anchors(
-            node.node, prefix_nullable=False, suffix_nullable=suffix_nullable
-        )
+        head, _ = _resolve_cached(node.node, prefix_nullable, False, cache)
+        mid, _ = _resolve_cached(node.node, False, False, cache)
+        tail, _ = _resolve_cached(node.node, False, suffix_nullable, cache)
         options = []
         if node.minimum == 0:
             options.append(Empty())
@@ -490,9 +551,7 @@ def _resolve_anchors(
             front = [_epsilon_restrict(p) for p in parts[:start]] if start >= 0 else []
             back = [_epsilon_restrict(p) for p in parts[end + 1 :]]
             middle = Concat(tuple(parts[start + 1 : end]))
-            resolved, _ = _resolve_anchors(
-                middle, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
-            )
+            resolved, _ = _resolve_cached(middle, prefix_nullable, suffix_nullable, cache)
             return _join([*front, resolved, *back]), True
         # No anchors at this level; every part may carry its own. A nested
         # `^` holds only when the actual text before the part is empty, a
@@ -507,11 +566,11 @@ def _resolve_anchors(
         gate_f = [True] * n
         gate_b = [True] * n
         gate_f_nodes = [
-            _resolve_anchors(p, prefix_nullable=prefix_nullable, suffix_nullable=False)[0]
+            _resolve_cached(p, prefix_nullable, False, cache)[0]
             for p in parts
         ]
         gate_b_nodes = [
-            _resolve_anchors(p, prefix_nullable=False, suffix_nullable=suffix_nullable)[0]
+            _resolve_cached(p, False, suffix_nullable, cache)[0]
             for p in parts
         ]
         for i in range(1, n):
@@ -519,27 +578,19 @@ def _resolve_anchors(
         for i in range(n - 1):
             gate_b[i] = all(_nullable(gate_b_nodes[j]) for j in range(i + 1, n))
         free = [
-            _resolve_anchors(p, prefix_nullable=False, suffix_nullable=False)[0]
+            _resolve_cached(p, False, False, cache)[0]
             for p in parts
         ]
         start_mode = [
-            _resolve_anchors(
-                p, prefix_nullable=prefix_nullable and gate_f[i], suffix_nullable=False
-            )[0]
+            _resolve_cached(p, prefix_nullable and gate_f[i], False, cache)[0]
             for i, p in enumerate(parts)
         ]
         end_mode = [
-            _resolve_anchors(
-                p, prefix_nullable=False, suffix_nullable=suffix_nullable and gate_b[i]
-            )[0]
+            _resolve_cached(p, False, suffix_nullable and gate_b[i], cache)[0]
             for i, p in enumerate(parts)
         ]
         both_mode = [
-            _resolve_anchors(
-                p,
-                prefix_nullable=prefix_nullable and gate_f[i],
-                suffix_nullable=suffix_nullable and gate_b[i],
-            )
+            _resolve_cached(p, prefix_nullable and gate_f[i], suffix_nullable and gate_b[i], cache)
             for i, p in enumerate(parts)
         ]
         held = any(survived for _, survived in both_mode)
@@ -548,9 +599,7 @@ def _resolve_anchors(
         terms: list[Node] = [_join(free)]
         if all(
             _nullable(
-                _resolve_anchors(
-                    p, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
-                )[0]
+                _resolve_cached(p, prefix_nullable, suffix_nullable, cache)[0]
             )
             for p in parts
         ):
@@ -558,11 +607,7 @@ def _resolve_anchors(
                 _join(
                     [
                         _epsilon_restrict(
-                            _resolve_anchors(
-                                p,
-                                prefix_nullable=prefix_nullable,
-                                suffix_nullable=suffix_nullable,
-                            )[0]
+                            _resolve_cached(p, prefix_nullable, suffix_nullable, cache)[0]
                         )
                         for p in parts
                     ]

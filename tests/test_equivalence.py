@@ -649,3 +649,26 @@ def test_backreferences_are_undecidable(pattern):
     subroutine spellings, which used to fall through to UNSUPPORTED."""
     result = equivalent(pattern, "x")
     assert result.verdict is Verdict.UNDECIDABLE, result.reason
+
+
+def test_anchor_resolution_does_not_explode_on_deep_nesting():
+    """Resolving an anchor inside a concatenation picks which part carries it,
+    and nested concatenations multiply those choices.
+
+    Re(gEx|DoS)Eval's reference 2284 is fifteen alternations deep inside
+    `^...$` and expands 98 nodes into 48 million — minutes of work for an
+    answer nobody can use. It is refused against a node budget instead, the
+    way the automata layer caps states, and the refusal is immediate.
+    """
+    import time
+
+    pattern = (
+        r"^(0|(\+)?[1-9]{1}[0-9]{0,8}|(\+)?[1-3]{1}[0-9]{1,9}|(\+)?[4]{1}([0-1]{1}"
+        r"[0-9]{8}|[2]{1}([0-8]{1}[0-9]{7}|[9]{1}([0-3]{1}[0-9]{6}|[4]{1}([0-8]{1}"
+        r"[0-9]{5}|[9]{1}([0-5]{1}[0-9]{4}|[6]{1}([0-6]{1}[0-9]{3}|[7]{1}([0-1]{1}"
+        r"[0-9]{2}|[2]{1}([0-8]{1}[0-9]{1}|[9]{1}[0-5]{1}))))))))$"
+    )
+    started = time.monotonic()
+    result = equivalent(pattern, "x")
+    assert time.monotonic() - started < 10, "anchor resolution blew up again"
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
