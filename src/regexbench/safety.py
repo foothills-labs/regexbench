@@ -128,7 +128,7 @@ def _sets_overlap(left: Node, right: Node) -> bool:
 
 
 def _unbounded(node: Repeat) -> bool:
-    return node.maximum is None or node.maximum > 1
+    return node.maximum is None
 
 
 def _contains_unbounded_repeat(node: Node) -> bool:

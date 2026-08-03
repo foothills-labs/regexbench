@@ -232,6 +232,22 @@ class TestCustomTasks:
         with pytest.raises(ValueError, match="unknown field"):
             load_tasks(path)
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            '{"positives": "abc"}',
+            '{"negatives": "xyz"}',
+            '{"positives": 12}',
+            '{"positives": ["a", 3]}',
+            '{"negatives": [true]}',
+        ],
+    )
+    def test_non_string_examples_are_refused(self, tmp_path, payload):
+        path = tmp_path / "tasks.jsonl"
+        path.write_text(payload + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="positives|negatives"):
+            load_tasks(path)
+
     def test_an_unknown_semantics_is_refused(self, tmp_path):
         path = tmp_path / "tasks.jsonl"
         path.write_text('{"positives": ["a"], "semantics": "partial"}\n', encoding="utf-8")
