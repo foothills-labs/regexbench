@@ -68,8 +68,14 @@ _CLASS_ESCAPES: dict[str, tuple[frozenset[str], bool]] = {
 }
 
 _LITERAL_ESCAPES = {
-    "n": "\n", "t": "\t", "r": "\r", "f": "\f", "v": "\v", "0": "\0",
+    "a": "\x07", "e": "\x1b", "n": "\n", "t": "\t", "r": "\r",
+    "f": "\f", "v": "\v",
 }
+
+# `[\b]` is the backspace character, unlike pattern-level `\b`.
+_CLASS_LITERAL_ESCAPES = {**_LITERAL_ESCAPES, "b": "\x08"}
+
+_HEX = frozenset("0123456789abcdefABCDEF")
 
 
 class Unsupported(ValueError):
@@ -747,8 +753,6 @@ class _Parser:
             raise Unsupported("pattern ends with a backslash")
         ch = self.eat()
 
-        if ch.isdigit() and ch != "0":
-            raise NonRegular("backreferences make the language non-regular")
         if ch in {"b", "B"}:
             # dk.brics defines \b as the literal 'b'; the corpora that use this
             # dialect mean a word boundary, and their paired descriptions say
@@ -765,9 +769,83 @@ class _Parser:
             chars, negated = _CLASS_ESCAPES[ch]
             self.literals.update(chars)
             return CharSet(chars, negated=negated, classes=frozenset(ch.lower()))
-        literal = _LITERAL_ESCAPES.get(ch, ch)
+        if ch.isdigit() and ch != "0":
+            # `\123` is an octal escape exactly when all three digits are
+            # octal (Python reads the first three); anything else of this
+            # shape is a group reference.
+            if (
+                ch in "1234567"
+                and self.pos + 1 < len(self.src)
+                and self.src[self.pos] in "01234567"
+                and self.src[self.pos + 1] in "01234567"
+            ):
+                literal = self._read_octal_escape(ch)
+            else:
+                raise NonRegular("backreferences make the language non-regular")
+        else:
+            literal = self._decode_escape(ch)
         self.literals.add(literal)
         return CharSet(frozenset(literal))
+
+    def _decode_escape(self, esc: str) -> str:
+        """The literal character the escape `esc` denotes.
+
+        `\\xHH`, `\\uHHHH` and `\\UHHHHHHHH` are exactly that many hex digits;
+        `\\0` takes up to two further octal digits and anything past that
+        stays literal, so `\\0123` is `\\n` + "3" exactly as in Python.
+        """
+        if esc in {"x", "u", "U"}:
+            return self._read_hex_escape({"x": 2, "u": 4, "U": 8}[esc])
+        if esc == "0":
+            return self._read_octal_escape("0")
+        if esc == "N":
+            return self._read_named_escape()
+        return _LITERAL_ESCAPES.get(esc, esc)
+
+    def _class_escape_literal(self, esc: str) -> str:
+        """The literal character a class escape denotes.
+
+        Classes have no group references, so every digit escape is octal
+        there, and `\\b` is the backspace character rather than a boundary.
+        """
+        if esc in "01234567":
+            return self._read_octal_escape(esc)
+        if esc == "b":
+            return _CLASS_LITERAL_ESCAPES["b"]
+        return self._decode_escape(esc)
+
+    def _read_hex_escape(self, digits: int) -> str:
+        raw = self.src[self.pos : self.pos + digits]
+        if len(raw) < digits or any(c not in _HEX for c in raw):
+            raise Unsupported(f"incomplete escape \\{self.src[self.pos - 1]}{raw}")
+        self.pos += digits
+        value = int(raw, 16)
+        if value > 0x10FFFF:
+            raise Unsupported(f"escape \\{self.src[self.pos - 1]}{raw} is out of range")
+        return chr(value)
+
+    def _read_octal_escape(self, first: str) -> str:
+        digits = first
+        while len(digits) < 3 and self.pos < len(self.src) and self.src[self.pos] in "01234567":
+            digits += self.src[self.pos]
+            self.pos += 1
+        value = int(digits, 8)
+        if value > 0o377:
+            raise Unsupported(f"octal escape value \\{digits} is out of range")
+        return chr(value)
+
+    def _read_named_escape(self) -> str:
+        if not self.src.startswith("{", self.pos):
+            raise Unsupported("missing { after \\N")
+        close = self.src.find("}", self.pos)
+        if close == -1:
+            raise Unsupported("unterminated \\N{ name")
+        name = self.src[self.pos + 1 : close]
+        self.pos = close + 1
+        try:
+            return unicodedata.lookup(name)
+        except KeyError:
+            raise Unsupported(f"undefined character name {name!r}") from None
 
     def _char_class(self) -> Node:
         negated = False
@@ -801,7 +879,7 @@ class _Parser:
                     chars.update(sub)
                     classes.add(esc.lower())
                     continue
-                ch = _LITERAL_ESCAPES.get(esc, esc)
+                ch = self._class_escape_literal(esc)
 
             is_range = (
                 self.peek() == "-"
@@ -812,7 +890,7 @@ class _Parser:
                 self.eat()
                 end = self.eat()
                 if end == "\\":
-                    end = _LITERAL_ESCAPES.get(self.eat(), self.src[self.pos - 1])
+                    end = self._class_escape_literal(self.eat())
                 if ord(end) < ord(ch):
                     raise Unsupported(f"reversed range {ch}-{end}")
                 if ord(end) - ord(ch) > 0x10000:
