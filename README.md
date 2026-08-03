@@ -256,12 +256,23 @@ match semantics and every later number is meaningless.
 ## Supported syntax
 
 The equivalence engine covers the genuinely regular subset: literals, escapes
-(`\d \w \s` and negations), `.`, character classes with ranges and negation,
-`*` `+` `?` `{m,n}`, alternation, and grouping. In the `BRICS` dialect it also
+(`\d \w \s` and negations, plus `\xHH`, `\uHHHH`, `\UHHHHHHHH`, `\N{NAME}`,
+`\a` and octal), `.`, character classes with ranges and negation, `*` `+` `?`
+`{m,n}`, alternation, and grouping. In the `BRICS` dialect it also
 covers intersection (`&`), complement (`~`), any-string (`@`) and the empty
 language (`#`) — all regular operations, computed on the automata directly.
 Anything else returns `UNSUPPORTED` or `UNDECIDABLE` rather than a wrong
 answer.
+
+Anchors are resolved wherever they appear, not just at the ends. Under
+full-match semantics `^` can only hold where everything before it is empty, so
+`a^` is the empty language, `a?^c` is `c`, and `(^a)*` is `a?` — the same
+strings Python matches. Under `SEARCH` semantics an anchor away from the ends
+is refused instead: the `.*p.*` rewrite cannot express it.
+
+Patterns Python's own parser rejects are rejected here too — `a**`, `\b*`,
+`\q`, `[\d-z]`. A pattern that cannot run under `re` should not get a verdict
+from a tool whose correctness and ReDoS halves both run `re`.
 
 Word boundaries (`\b`, `\B`) are supported. They look like lookaround and are
 not: the condition depends only on the two characters either side of a
@@ -298,10 +309,10 @@ Known limits, in the order they cost you coverage:
 
 | Construct | Status |
 | --- | --- |
-| `^` / `$` away from the pattern ends | `UNSUPPORTED` — decidable, not built. 10.5% of Re(gEx|DoS)Eval |
-| Lookaround | `UNSUPPORTED` — regular, not built. 5.5% of Re(gEx|DoS)Eval |
+| Lookaround | `UNSUPPORTED` — regular, not built. 5.6% of Re(gEx|DoS)Eval |
 | Backreferences | `UNDECIDABLE` — no engine can answer this |
-| Possessive quantifiers, atomic groups | `UNSUPPORTED` |
+| `[\D0-9]` — a negated shorthand mixed with other members | `UNSUPPORTED` — not one character set |
+| Possessive quantifiers, atomic groups | `UNSUPPORTED` unless the body matches exactly one way |
 
 Correctness scoring and ReDoS screening have no such limit — they run the real
 `re` engine and work on any pattern it compiles.
