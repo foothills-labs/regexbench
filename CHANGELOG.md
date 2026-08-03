@@ -5,7 +5,7 @@ Notable changes to `regexbench`. Format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with the caveat
 that a 0.x line makes no stability promise.
 
-## 0.2.1 — unreleased
+## 0.3.0 — 2026-08-03
 
 ### Fixed
 
@@ -73,22 +73,7 @@ that a 0.x line makes no stability promise.
   budget, the way the automata layer already caps states. That pattern now
   answers in 0.2s, and the whole corpus parses in 1.7s.
 
-- **Word boundaries on CPython 3.14.** 3.14 changed `\B` to match the empty
-  string ([gh-124130](https://github.com/python/cpython/issues/124130)), making
-  it exactly the negation of `\b`; 3.13 and earlier refuse it there, which made
-  `\B` the empty language under a full match. 0.2.0 modelled only the older
-  behaviour, so on 3.14 it disagreed with the `re` it was scoring against — 13
-  of its own differential tests caught this, which is what they are for.
-
-  The rule is now probed at import rather than compared against
-  `sys.version_info`. The running interpreter is the authority, because
-  `check()` executes patterns with that same `re`; a backported fix or a
-  rebuilt interpreter would make a version test lie.
-
 ### Added
-
-- **Python 3.14 is supported and tested.** The classifier and the CI matrix
-  entry are back, and the suite passes on 3.10 through 3.14.
 
 - **Escape and misplaced-anchor atoms in the differential generator.** Its lack
   of them is why the anchor and escape families shipped at all: a generator
@@ -109,6 +94,27 @@ that a 0.x line makes no stability promise.
   docs previously quoted the full-match number for it. The stale claim that
   only 51.1% of KB13 is analyzable is gone; all three dk.brics corpora parse in
   full, 20,824 patterns.
+
+## 0.2.1 — 2026-08-02
+
+### Fixed
+
+- **Word boundaries on CPython 3.14.** 3.14 changed `\B` to match the empty
+  string ([gh-124130](https://github.com/python/cpython/issues/124130)), making
+  it exactly the negation of `\b`; 3.13 and earlier refuse it there, which made
+  `\B` the empty language under a full match. 0.2.0 modelled only the older
+  behaviour, so on 3.14 it disagreed with the `re` it was scoring against — 13
+  of its own differential tests caught this, which is what they are for.
+
+  The rule is now probed at import rather than compared against
+  `sys.version_info`. The running interpreter is the authority, because
+  `check()` executes patterns with that same `re`; a backported fix or a
+  rebuilt interpreter would make a version test lie.
+
+### Added
+
+- **Python 3.14 is supported and tested.** The classifier and the CI matrix
+  entry are back, and the suite passes on 3.10 through 3.14.
 
 ## 0.2.0 — 2026-08-02
 
