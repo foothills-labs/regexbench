@@ -44,9 +44,10 @@ def task_from_dict(payload: dict[str, Any], *, where: str = "task") -> Task:
         raise ValueError(f"{where}: {exc}") from exc
 
     try:
+        examples = _string_list(payload, where)
         return Task(
-            positives=list(payload.get("positives", [])),
-            negatives=list(payload.get("negatives", [])),
+            positives=examples["positives"],
+            negatives=examples["negatives"],
             prompt=payload.get("prompt", ""),
             reference=payload.get("reference"),
             name=payload.get("name", ""),
@@ -55,6 +56,18 @@ def task_from_dict(payload: dict[str, Any], *, where: str = "task") -> Task:
         )
     except ValueError as exc:
         raise ValueError(f"{where}: {exc}") from exc
+
+
+def _string_list(payload: dict[str, Any], where: str) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for field in ("positives", "negatives"):
+        value = payload.get(field, [])
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise ValueError(f"{field} must be a list of strings")
+        out[field] = value
+    return out
 
 
 def load_tasks(path: str | Path) -> list[Task]:

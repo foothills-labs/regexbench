@@ -21,6 +21,21 @@ def test_ordinary_patterns_are_not_flagged(pattern):
     assert bool(result)
 
 
+@pytest.mark.parametrize("pattern", [r"(a+){2}", r"(a|a){2}", r"(a|a){3}", r"(a|a){2,3}"])
+def test_a_bounded_repeat_does_not_explode(pattern):
+    # {m} or {m,n} with a finite n fixes the number of repetitions, so
+    # backtracking is bounded by the text length raised to that constant
+    # power at worst — polynomial, not exponential.
+    result = screen(pattern, empirical=False)
+    assert result.risk is not Risk.EXPONENTIAL, result.reason
+
+
+@pytest.mark.parametrize("pattern", [r"(a+)+", r"(a|a)*"])
+def test_unbounded_repeats_are_still_flagged(pattern):
+    result = screen(pattern, empirical=False)
+    assert result.risk is Risk.EXPONENTIAL, result.reason
+
+
 def test_adjacent_overlapping_quantifiers_are_polynomial():
     result = screen(r"\s*\s*x", empirical=False)
     assert result.risk is Risk.POLYNOMIAL
