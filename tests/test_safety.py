@@ -84,3 +84,31 @@ def test_safe_match_kills_a_catastrophic_pattern():
 def test_timeout_message_explains_the_cause():
     with pytest.raises(MatchTimeout, match="backtracking"):
         safe_search(r"(a+)+$", "a" * 40 + "!", timeout=0.3)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        # A bounded but *wide* inner repeat is still combinatorial to split:
+        # this one is unusable at two dozen characters, and a rule that looked
+        # only for `maximum is None` called it safe.
+        r"^([1-9]{1}[0-9]{0,7})+((,[1-9]{1}[0-9]{0,7}){0,1})+$",
+        r"(a{0,7})+",
+        r"(a{1,2})+",
+        # Every atom here is a single optional, which CPython handles alone —
+        # but six in a row give the outer `+` combinatorially many ways to
+        # divide the same text, and it hangs.
+        r"^((\.)?([a-zA-Z0-9_-]?)(\.)?([a-zA-Z0-9_-]?)(\.)?)+$",
+    ],
+)
+def test_variable_width_bodies_are_flagged(pattern):
+    result = screen(pattern, empirical=False)
+    assert result.risk is Risk.EXPONENTIAL, result.reason
+
+
+@pytest.mark.parametrize("pattern", [r"(\d?)*", r"(a?)*", r"(a{2}){2}", r"a{2}a{2}"])
+def test_fixed_and_single_optional_bodies_are_not_flagged(pattern):
+    """`(\\d?)*` varies by one optional character and CPython's empty-loop
+    guard keeps it linear; `(a{2}){2}` divides exactly one way."""
+    result = screen(pattern, empirical=False)
+    assert result.risk is Risk.SAFE, result.reason
