@@ -154,6 +154,21 @@ class Assert(Node):
 
 
 @dataclass(frozen=True)
+class Anchor(Node):
+    """A start or end anchor: `^` or `$`.
+
+    Under full-match semantics `^` at the very start and `$` at the very end
+    are the identity, so the parser folds those away and only records the
+    flags for SEARCH semantics. Any other anchor — inside a group, mid-branch,
+    mid-concatenation — is resolved by `_resolve_anchors` against what may
+    precede or follow it, so an anchor that can never hold collapses the
+    language to empty, exactly as Python's engine treats it.
+    """
+
+    is_start: bool  # True for `^`, False for `$`
+
+
+@dataclass(frozen=True)
 class Intersect(Node):
     """Strings matched by every branch. dk.brics `&`; no Python equivalent."""
 
@@ -191,6 +206,15 @@ def parse(
     node = parser.parse_alternation()
     if parser.pos != len(parser.src):
         raise Unsupported(f"unexpected {parser.peek()!r} at position {parser.pos}")
+    if semantics is Semantics.SEARCH:
+        # The search reduction widens the pattern with `.*`, which would
+        # move any nested anchor away from the position it constrains.
+        # Pattern-edge anchors were already folded into the flags; the
+        # rest are refused rather than mis-answered.
+        if _contains_anchor(node):
+            raise Unsupported("anchors are only supported at the pattern edges")
+    else:
+        node, _ = _resolve_anchors(node, prefix_nullable=True, suffix_nullable=True)
     if semantics is Semantics.SEARCH:
         node = _widen_for_search(node, parser.anchored_start, parser.anchored_end)
     return node, frozenset(parser.literals)
@@ -250,6 +274,296 @@ def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> N
             )
         )
     return wrap(node, not anchored_start, not anchored_end)
+
+
+def _nullable(node: Node) -> bool:
+    """Whether the empty string belongs to the language."""
+    if isinstance(node, Empty) or isinstance(node, Assert) or isinstance(node, Anchor):
+        return True
+    if isinstance(node, CharSet):
+        return False  # a character set never matches the empty string
+    if isinstance(node, Concat):
+        return all(_nullable(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return any(_nullable(option) for option in node.options)
+    if isinstance(node, Repeat):
+        return node.minimum == 0 or _nullable(node.node)
+    if isinstance(node, Intersect):
+        return all(_nullable(part) for part in node.parts)
+    return not _nullable(node.node)  # Complement
+
+
+def _contains_anchor(node: Node) -> bool:
+    if isinstance(node, Anchor):
+        return True
+    if isinstance(node, Concat):
+        return any(_contains_anchor(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return any(_contains_anchor(option) for option in node.options)
+    if isinstance(node, Repeat):
+        return _contains_anchor(node.node)
+    return False
+
+
+def _resolve_anchors(
+    node: Node, *, prefix_nullable: bool, suffix_nullable: bool
+) -> tuple[Node, bool]:
+    """Fold every anchor away, matching what Python's engine can match.
+
+    An anchor is where the text says it is: `^` is satisfiable only if the
+    whole match up to it is the empty string, `$` only if the whole match
+    after it is. If that cannot happen the branch matches nothing — Python
+    compiles `a^` and it simply never matches. If it can, the anchor is the
+    identity and the side it guards collapses to the empty string: `a?^c`
+    is `c`, not `a?c`, because a non-empty `a?` would put `^` at position
+    one. This is why `a?^` is the empty pattern and `a*^b` is `b`.
+
+    The two flags say whether the text on each side *can* be empty. A nested
+    anchor needs more than that: `a?(^a)` is `a`, not `a?a`, because the `^`
+    demands that the text before the group actually *is* empty. Inside a
+    repetition at most one iteration can carry a non-empty match — a second
+    one would sit at position one or later — and the `^`-bearing iteration
+    must be the first, the `$`-bearing one the last, so `(^a)*` is `a?`,
+    `(^a)+` is `a` and `(^a){2}` matches nothing. Exact counts mix these
+    shapes through `first · middle* · last`, and when the body also has
+    anchor-free paths those repeat freely around the anchored ones.
+
+    Returns the resolved node and whether any anchor survived it (resolved
+    to the identity rather than to the empty language).
+    """
+    if isinstance(node, Anchor):
+        holds = prefix_nullable if node.is_start else suffix_nullable
+        if holds:
+            return Empty(), True
+        return CharSet(frozenset()), False
+    if isinstance(node, Alternate):
+        options = []
+        held = False
+        for option in node.options:
+            resolved, survived = _resolve_anchors(
+                option, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
+            )
+            options.append(resolved)
+            held = held or survived
+        return Alternate(tuple(options)), held
+    if isinstance(node, Repeat):
+        inner, held = _resolve_anchors(
+            node.node, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
+        )
+        if not _contains_anchor(node.node) or not held:
+            return Repeat(inner, node.minimum, node.maximum), held
+        if node.maximum == 0:
+            return Empty(), True
+        # An anchored repetition: the `^`-bearing iteration must be first
+        # (every earlier one matches the empty string) and the `$`-bearing
+        # one last. Non-empty iterations can therefore only appear as the
+        # single iteration, or as a first/middle/last triple.
+        head, _ = _resolve_anchors(
+            node.node, prefix_nullable=prefix_nullable, suffix_nullable=False
+        )
+        mid, _ = _resolve_anchors(node.node, prefix_nullable=False, suffix_nullable=False)
+        tail, _ = _resolve_anchors(
+            node.node, prefix_nullable=False, suffix_nullable=suffix_nullable
+        )
+        options = []
+        if node.minimum == 0:
+            options.append(Empty())
+        if _nullable(inner):
+            options.append(Empty())
+        if node.minimum <= 1 <= (node.maximum if node.maximum is not None else 10**9):
+            options.append(inner)
+        if node.maximum is None or node.maximum >= 2:
+            e_filler = _nullable(head) or _nullable(mid) or _nullable(tail)
+            if e_filler:
+                options.append(inner)
+            if e_filler:
+                lo = 0
+            else:
+                lo = max(0, node.minimum - 2)
+            hi = node.maximum - 2 if node.maximum is not None else None
+            options.append(Concat((head, Repeat(mid, lo, hi), tail)))
+        return (
+            options[0] if len(options) == 1 else Alternate(tuple(options)),
+            True,
+        )
+    if isinstance(node, Concat):
+        parts = list(node.parts)
+        if not parts:
+            return Empty(), False
+        # A `^` demands that everything before it be the empty string; a `$`
+        # that everything after it be. Every start-anchor's demand is implied
+        # by the last start-anchor's, and every end-anchor's by the first
+        # end-anchor's, so only those two matter.
+        start = -1
+        end = len(parts)
+        for index, part in enumerate(parts):
+            if isinstance(part, Anchor):
+                if part.is_start:
+                    start = index
+                elif end == len(parts):
+                    end = index
+        front_ok = prefix_nullable and all(_nullable(p) for p in parts[:start])
+        back_ok = suffix_nullable and all(_nullable(p) for p in parts[end + 1 :])
+        if start >= 0 and not front_ok:
+            return CharSet(frozenset()), False
+        if end < len(parts) and not back_ok:
+            return CharSet(frozenset()), False
+        if start > end:
+            # The demands overlap: `b$^` needs the `b` to be empty, `$b^c`'s
+            # `^` sits after the `b$`... everything must be the empty string,
+            # or the concatenation matches nothing.
+            if all(_nullable(p) for p in parts):
+                return Empty(), True
+            return CharSet(frozenset()), False
+        if start != -1 or end != len(parts):
+            # The anchors at `start` and `end` hold: what lies before the
+            # last start-anchor and after the first end-anchor is empty, and
+            # the two anchors are themselves the identity. Only the middle
+            # remains, still inside the surrounding match.
+            middle = Concat(tuple(parts[start + 1 : end]))
+            resolved, survived = _resolve_anchors(
+                middle, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
+            )
+            return resolved, True or survived
+        # No anchors at this level; every part may carry its own. A nested
+        # `^` holds only when the actual text before the part is empty, a
+        # nested `$` only when the text after it is — "can be empty" is not
+        # enough (`a?(^a)` is `a`, not `a?a`). Each part therefore resolves
+        # in up to four contexts — free (both sides occupied), start-anchored
+        # (`^`s alive), end-anchored (`$`s alive), both — and the parts
+        # combine over every legal assignment: the start-anchored part must
+        # be preceded only by empty parts, the end-anchored one followed only
+        # by empty ones, and at most one of each can carry a non-empty match.
+        n = len(parts)
+        gate_f = [True] * n
+        gate_b = [True] * n
+        gate_f_nodes = [
+            _resolve_anchors(p, prefix_nullable=prefix_nullable, suffix_nullable=False)[0]
+            for p in parts
+        ]
+        gate_b_nodes = [
+            _resolve_anchors(p, prefix_nullable=False, suffix_nullable=suffix_nullable)[0]
+            for p in parts
+        ]
+        for i in range(1, n):
+            gate_f[i] = all(_nullable(gate_f_nodes[j]) for j in range(i))
+        for i in range(n - 1):
+            gate_b[i] = all(_nullable(gate_b_nodes[j]) for j in range(i + 1, n))
+        free = [
+            _resolve_anchors(p, prefix_nullable=False, suffix_nullable=False)[0]
+            for p in parts
+        ]
+        start_mode = [
+            _resolve_anchors(
+                p, prefix_nullable=prefix_nullable and gate_f[i], suffix_nullable=False
+            )[0]
+            for i, p in enumerate(parts)
+        ]
+        end_mode = [
+            _resolve_anchors(
+                p, prefix_nullable=False, suffix_nullable=suffix_nullable and gate_b[i]
+            )[0]
+            for i, p in enumerate(parts)
+        ]
+        both_mode = [
+            _resolve_anchors(
+                p,
+                prefix_nullable=prefix_nullable and gate_f[i],
+                suffix_nullable=suffix_nullable and gate_b[i],
+            )
+            for i, p in enumerate(parts)
+        ]
+        held = any(survived for _, survived in both_mode)
+        restrict_f = [_epsilon_restrict(g) for g in gate_f_nodes]
+        restrict_b = [_epsilon_restrict(g) for g in gate_b_nodes]
+        terms: list[Node] = [_join(free)]
+        if all(
+            _nullable(
+                _resolve_anchors(
+                    p, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
+                )[0]
+            )
+            for p in parts
+        ):
+            terms.append(
+                _join(
+                    [
+                        _epsilon_restrict(
+                            _resolve_anchors(
+                                p,
+                                prefix_nullable=prefix_nullable,
+                                suffix_nullable=suffix_nullable,
+                            )[0]
+                        )
+                        for p in parts
+                    ]
+                )
+            )
+        for i in range(n):
+            if gate_f[i]:
+                terms.append(
+                    _join(restrict_f[:i] + [start_mode[i]] + free[i + 1 :])
+                )
+            if gate_b[i]:
+                terms.append(
+                    _join(free[:i] + [end_mode[i]] + restrict_b[i + 1 :])
+                )
+            if gate_f[i] and gate_b[i]:
+                terms.append(
+                    _join(restrict_f[:i] + [both_mode[i][0]] + restrict_b[i + 1 :])
+                )
+        for i in range(n):
+            if not gate_f[i]:
+                continue
+            for j in range(i + 1, n):
+                if gate_b[j]:
+                    terms.append(
+                        _join(
+                            restrict_f[:i]
+                            + [start_mode[i]]
+                            + free[i + 1 : j]
+                            + [end_mode[j]]
+                            + restrict_b[j + 1 :]
+                        )
+                    )
+        return terms[0] if len(terms) == 1 else Alternate(tuple(terms)), held
+    return node, False
+
+
+def _epsilon_restrict(node: Node) -> Node:
+    """The empty-string part of `node`, with its assertions kept.
+
+    An assertion consumes no characters yet still constrains its position, so
+    it survives a part being forced to match the empty string; everything else
+    collapses to the empty string (it was already checked to be nullable) or
+    to the empty language.
+    """
+    if isinstance(node, Assert):
+        return node
+    if isinstance(node, Empty) or isinstance(node, Anchor):
+        return Empty()
+    if isinstance(node, CharSet):
+        return CharSet(frozenset())
+    if isinstance(node, Concat):
+        return _join([_epsilon_restrict(p) for p in node.parts])
+    if isinstance(node, Alternate):
+        return Alternate(tuple(_epsilon_restrict(o) for o in node.options))
+    if isinstance(node, Repeat):
+        if node.minimum == 0:
+            return Empty()
+        return _epsilon_restrict(node.node)
+    if isinstance(node, Intersect):
+        # An intersection matches the empty string where every operand does,
+        # so each operand's assertions still constrain the position.
+        return Intersect(tuple(_epsilon_restrict(p) for p in node.parts))
+    return Empty()  # Complement: its ε part is unconstrained by what it negates
+
+
+def _join(nodes: list[Node]) -> Node:
+    """Concatenate resolved parts, keeping the empty/singleton cases plain."""
+    if not nodes:
+        return Empty()
+    return nodes[0] if len(nodes) == 1 else Concat(tuple(nodes))
 
 
 class _Parser:
@@ -386,15 +700,17 @@ class _Parser:
             self.literals.add(ch)
             return CharSet(frozenset(ch))
         if ch in "^$":
-            # Redundant at the ends under full-match semantics; meaningful
-            # anywhere else, which this parser cannot express.
-            if self.pos == 1 or self.pos == len(self.src):
-                if ch == "^" and self.pos == 1:
-                    self.anchored_start = True
-                elif ch == "$" and self.pos == len(self.src):
-                    self.anchored_end = True
+            # Only the true pattern edges are identities under full-match
+            # semantics. Anywhere else the anchor still has a meaning — `a^`
+            # matches nothing, `(^a)` matches `a` — decided later by
+            # `_resolve_anchors`, which knows what may surround the anchor.
+            if ch == "^" and self.pos == 1:
+                self.anchored_start = True
                 return Empty()
-            raise Unsupported(f"anchor {ch!r} is only supported at the pattern ends")
+            if ch == "$" and self.pos == len(self.src):
+                self.anchored_end = True
+                return Empty()
+            return Anchor(is_start=(ch == "^"))
         if ch in "*+?":
             raise Unsupported(f"nothing to repeat at position {self.pos - 1}")
 
