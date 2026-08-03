@@ -107,14 +107,25 @@ def equivalent(
     )
 
 
-def is_regular(pattern: str, *, dialect: Dialect = Dialect.PYTHON) -> bool:
+def is_regular(
+    pattern: str,
+    *,
+    semantics: Semantics = Semantics.FULLMATCH,
+    dialect: Dialect = Dialect.PYTHON,
+) -> bool:
     """Whether `pattern` stays inside the regular languages.
 
     False means equivalence checking cannot apply — fall back to
     example-based evaluation.
+
+    Pass the `semantics` a task will be scored under, because the answer
+    depends on it: an anchor away from the pattern ends is resolved exactly
+    under FULLMATCH and refused under SEARCH, where the ``.*p.*`` rewrite
+    cannot express it. Asking with the default while scoring a search corpus
+    overstates what the engine will actually decide.
     """
     try:
-        parse(pattern, dialect=dialect)
+        parse(pattern, semantics=semantics, dialect=dialect)
     except NonRegular:
         return False
     except Unsupported:
