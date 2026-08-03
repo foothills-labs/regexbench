@@ -317,3 +317,111 @@ def test_shorthand_classes_are_unicode_aware(left, right, witness):
     ), f"witness {result.witness!r} does not reproduce the difference"
     if witness is not None:
         assert result.witness == witness
+
+
+# --------------------------------------------------------------------------
+# Escape values: \\xHH, \\uHHHH, \\UHHHHHHHH, \\a, \\e, and octal.
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"\x2F", "/"),  # RegexEval 263
+        (r"\x20", " "),  # RegexEval 704, 848
+        (r"\x41", "A"),
+        (r"\x41\x42", "AB"),
+        (r"\x41\u0042\U00000043", "ABC"),
+        (r"\u0041", "A"),
+        (r"\U00000041", "A"),
+        (r"\a", "\x07"),
+        (r"\a\x07", "\x07\x07"),
+        (r"\N{EM DASH}", "\u2014"),
+        (r"\N{LATIN CAPITAL LETTER A}\x41", "AA"),
+    ],
+)
+def test_hex_unicode_and_control_escapes_decode_to_their_characters(left, right):
+    """`\\xHH` is one character, not the three-letter text `xHH`.
+
+    The parser used to read `\\x41` as the literal text "x41", which made it
+    equivalent to `x41` — a wrong verdict on real corpus patterns (`\\x20`,
+    `\\x2F`) whose whole point is the decoded character.
+    """
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.EQUIVALENT, f"{left} vs {right}: {result.reason}"
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"\0", "\x00"),
+        (r"\00", "\x00"),
+        (r"\000", "\x00"),
+        (r"\012", "\n"),
+        (r"\037", "\x1f"),
+        (r"\377", "\xff"),
+        # Octal takes at most three digits; what follows stays literal.
+        (r"\09", "\x009"),
+        (r"\0123", "\n3"),
+        (r"\0377", "\x1f7"),
+    ],
+)
+def test_octal_escapes_take_up_to_three_digits(left, right):
+    """`\\0123` is `\\n` + "3", not a backreference to group 123.
+
+    The parser used to take only the `\\0` and then refuse the next digit as a
+    backreference, so `\\0123` was not even analyzable.
+    """
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.EQUIVALENT, f"{left} vs {right}: {result.reason}"
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"[\x41]", "A"),
+        (r"[\u0041]", "A"),
+        (r"[\00]", "\x00"),
+        (r"[\0123]", "[\n3]"),
+        (r"[\12]", "[\n]"),
+        (r"[\1]", "[\x01]"),
+        (r"[\b]", "\x08"),  # in a class, \b is backspace
+        (r"[\x41-\x43]", "[A-C]"),
+        (r"[\x21-\x26]", "[!-&]"),
+        (r"[^\x00-\x1f]", "[^\x00-\x1f]"),  # RegexEval 1625 style range
+    ],
+)
+def test_escapes_decode_inside_character_classes(left, right):
+    """The decoded character, not the escape text, belongs to the class."""
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.EQUIVALENT, f"{left} vs {right}: {result.reason}"
+
+
+def test_corpus_patterns_using_escapes_score_perfectly():
+    """RegexEval patterns whose language is carried by `\\x20` and ranges.
+
+    These are scored on their own match/non-match examples, so a parser that
+    reads `\\x20` as "x20" fails every positive.
+    """
+    from regexbench import Task, check
+
+    for pattern, positives, negatives in (
+        # RegexEval 263: `\\x2F` is the date separator `/`.
+        (
+            r"(^((((0[1-9])|([1-2][0-9])|(3[0-1]))|([1-9]))\x2F(((0[1-9])|(1[0-2]))|([1-9]))\x2F(([0-9]{2})|(((19)|([2]([0]{1})))([0-9]{2}))))$)",
+            ["31/12/2099", "1/1/1900", "10/12/2003"],
+            ["05/11/3000", "11/13/2003", "32/04/2030"],
+        ),
+        # RegexEval 704: `\\x20` is the space in the timestamp.
+        (
+            r"^(19[0-9]{2}|[2-9][0-9]{3})-((0(1|3|5|7|8)|10|12)-(0[1-9]|1[0-9]|2[0-9]|3[0-1])|(0(4|6|9)|11)-(0[1-9]|1[0-9]|2[0-9]|30)|(02)-(0[1-9]|1[0-9]|2[0-9]))\x20(0[0-9]|1[0-9]|2[0-3])(:[0-5][0-9]){2}$",
+            ["2004-07-12 14:25:59", "1900-01-01 00:00:00", "9999-12-31 23:59:59"],
+            ["04-07-12 14:25:59", "20004-07-12 14:25", "2004/07/12 14:25:59"],
+        ),
+        # RegexEval 1625: `\\x00-\\x1f` and friends delimit the allowed set.
+        (
+            r"^[^\x00-\x1f\x21-\x26\x28-\x2d\x2f-\x40\x5b-\x60\x7b-\xff]+$",
+            ["Sir. Isaac Newton", "Tom O'Leary", "hello"],
+            ["Mar!y Ann", "Bob_1", "~!@#$%^&*()_+=-0987654321`{}[]"],
+        ),
+    ):
+        report = check(pattern, Task(positives=positives, negatives=negatives))
+        assert report.perfect, f"{pattern!r} failed: {report}"
