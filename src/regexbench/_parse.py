@@ -68,12 +68,16 @@ _CLASS_ESCAPES: dict[str, tuple[frozenset[str], bool]] = {
 }
 
 _LITERAL_ESCAPES = {
-    "a": "\x07", "e": "\x1b", "n": "\n", "t": "\t", "r": "\r",
-    "f": "\f", "v": "\v",
+    "a": "\x07", "n": "\n", "t": "\t", "r": "\r", "f": "\f", "v": "\v",
 }
 
-# `[\b]` is the backspace character, unlike pattern-level `\b`.
+# Letters that may follow a backslash outside a class. Everything else is a
+# "bad escape" in Python's parser and is refused rather than read literally.
+_PATTERN_ESCAPE_LETTERS = frozenset("afnrtvxUuN")
+
+# In a class, `\b` is additionally the backspace character.
 _CLASS_LITERAL_ESCAPES = {**_LITERAL_ESCAPES, "b": "\x08"}
+_CLASS_ESCAPE_LETTERS = frozenset("abfnrtvxUuN")
 
 _HEX = frozenset("0123456789abcdefABCDEF")
 
@@ -188,6 +192,35 @@ class Complement(Node):
     node: Node
 
 
+@dataclass(frozen=True)
+class Poss(Node):
+    """A possessive quantifier: the repetition count, once chosen, is sealed.
+
+    That only changes the language when the inner atom can match several ways
+    (then the sealed greedy choice may differ from the plain reading) or when
+    later text could backtrack into the repetition. The parser records the
+    construction and `_finalize_sticky` decides, once the whole tree is
+    known, whether this one sits where the languages agree.
+    """
+
+    node: Node
+    minimum: int
+    maximum: int | None
+
+
+@dataclass(frozen=True)
+class Atomic(Node):
+    """An atomic group `(?>...)`: the group's match is sealed when it exits.
+
+    Python seals the group's *whole* match, greedy choice and all, so
+    atomicity is only transparent when the content can match exactly one way
+    — no repetition, no alternation. Anything else changes the language and
+    is refused rather than answered with the plain-group reading.
+    """
+
+    node: Node
+
+
 def parse(
     pattern: str,
     *,
@@ -212,6 +245,7 @@ def parse(
     node = parser.parse_alternation()
     if parser.pos != len(parser.src):
         raise Unsupported(f"unexpected {parser.peek()!r} at position {parser.pos}")
+    node = _finalize_sticky(node, at_end=True)
     if semantics is Semantics.SEARCH:
         # The search reduction widens the pattern with `.*`, which would
         # move any nested anchor away from the position it constrains.
@@ -572,6 +606,90 @@ def _join(nodes: list[Node]) -> Node:
     return nodes[0] if len(nodes) == 1 else Concat(tuple(nodes))
 
 
+def _ambiguous(node: Node) -> bool:
+    """Whether `node` can match a given position several different ways.
+
+    Repetitions pick a count and alternations pick a branch, so both are
+    ambiguous; everything else is determined by the input.
+    """
+    if isinstance(node, (Repeat, Poss, Alternate)):
+        return True
+    if isinstance(node, (Concat, Intersect)):
+        return any(_ambiguous(part) for part in node.parts)
+    if isinstance(node, (Atomic, Complement)):
+        return _ambiguous(node.node)
+    return False
+
+
+def _sticky_problem(node: Node) -> bool:
+    """Whether `node` contains a possessive repeat or an atomic group whose
+    sealed match could diverge from the plain-language reading.
+
+    A possessive repetition is always a problem: it seals a count that the
+    surrounding repetitions are unaware of. An atomic group is only a problem
+    when its content is ambiguous, so `(?>(ab))*` is fine while `(?>a|ab)*`
+    is not.
+    """
+    if isinstance(node, Poss):
+        return True
+    if isinstance(node, Atomic):
+        return _ambiguous(node.node)
+    if isinstance(node, (Concat, Intersect)):
+        return any(_sticky_problem(part) for part in node.parts)
+    if isinstance(node, (Repeat, Complement)):
+        return _sticky_problem(node.node)
+    return False
+
+
+def _finalize_sticky(node: Node, at_end: bool) -> Node:
+    """Resolve possessive quantifiers and atomic groups to plain repeats.
+
+    A possessive quantifier is provably the same language as its plain
+    spelling exactly when nothing follows it that could backtrack into it
+    (`at_end`) *and* the repeated atom can only match one way — a sealed
+    greedy choice over an ambiguous atom differs even alone, as `(a|ab){2}+`
+    does from `(a|ab){2}`. An atomic group is transparent exactly when its
+    content can only match one way, wherever it sits: `(?>a|ab)` fullmatches
+    only "a", so even alone it is not `a|ab`. Any other placement is refused
+    with `Unsupported` rather than answered with the wrong language.
+    """
+    if isinstance(node, Poss):
+        if not at_end or _ambiguous(node.node):
+            raise Unsupported(
+                "possessive quantifiers need an unambiguous atom at the end of a branch"
+            )
+        return Repeat(node.node, node.minimum, node.maximum)
+    if isinstance(node, Atomic):
+        if _ambiguous(node.node):
+            raise Unsupported(
+                "atomic groups with repetition or alternation inside are not supported"
+            )
+        return _finalize_sticky(node.node, at_end)
+    if isinstance(node, Repeat):
+        if _sticky_problem(node.node):
+            raise Unsupported(
+                "possessive quantifiers and ambiguous atomic groups cannot be repeated"
+            )
+        return Repeat(_finalize_sticky(node.node, False), node.minimum, node.maximum)
+    if isinstance(node, Concat):
+        n = len(node.parts)
+        return Concat(
+            tuple(
+                _finalize_sticky(part, at_end and index == n - 1)
+                for index, part in enumerate(node.parts)
+            )
+        )
+    if isinstance(node, Alternate):
+        return Alternate(tuple(_finalize_sticky(option, at_end) for option in node.options))
+    if isinstance(node, Intersect):
+        return Intersect(
+            tuple(_finalize_sticky(part, at_end) for part in node.parts)
+        )
+    if isinstance(node, Complement):
+        return Complement(_finalize_sticky(node.node, at_end))
+    return node
+
+
 class _Parser:
     def __init__(self, src: str, dialect: Dialect = Dialect.PYTHON) -> None:
         self.src = src
@@ -583,6 +701,15 @@ class _Parser:
         # into Empty(), so by the time there is an AST the anchor is gone.
         self.anchored_start = False
         self.anchored_end = False
+        # Set by parse_atom for zero-width atoms (assertions, anchors, and
+        # pattern-edge anchors folded to Empty) and consumed by parse_repeat,
+        # which must refuse to quantify them — unless a group wraps them.
+        self._atom_is_zero_width = False
+        # Set by parse_atom for group atoms: Python lets a quantifier follow a
+        # group-wrapped repeat (`(a+)+` is fine) but not a bare one (`a++` is
+        # "multiple repeat"), so the parser needs to know where the atom came
+        # from. Consumed by the first quantifier in parse_repeat.
+        self._atom_from_group = False
 
     def peek(self) -> str | None:
         return self.src[self.pos] if self.pos < len(self.src) else None
@@ -621,33 +748,40 @@ class _Parser:
 
     def parse_repeat(self) -> Node:
         node = self.parse_complement()
+        if self._atom_is_zero_width:
+            ch = self.peek()
+            # A `{` only counts as a quantifier when it forms valid bounds;
+            # `\b{2, 3}` is literal text in Python, while `\b{2}` and `\b?`
+            # are "nothing to repeat".
+            if ch in ("*", "+", "?") or (ch == "{" and self._try_bounds() is not None):
+                raise Unsupported(f"nothing to repeat at position {self.pos - 1}")
+        self._atom_is_zero_width = False
         while True:
             ch = self.peek()
-            if ch == "*":
-                self.eat()
-                node = Repeat(node, 0, None)
-            elif ch == "+":
-                self.eat()
-                node = Repeat(node, 1, None)
-            elif ch == "?":
-                self.eat()
-                node = Repeat(node, 0, 1)
-            elif ch == "{":
+            if ch not in ("*", "+", "?", "{"):
+                break
+            if ch == "{":
                 bounds = self._try_bounds()
                 if bounds is None:
-                    break
-                node = Repeat(node, bounds[0], bounds[1])
+                    break  # `{` is not a quantifier here; leave it as literal text
+                minimum, maximum = bounds
             else:
-                break
+                self.eat()
+                minimum, maximum = {"*": (0, None), "+": (1, None), "?": (0, 1)}[ch]
+            if isinstance(node, (Repeat, Poss)) and not self._atom_from_group:
+                raise Unsupported(f"multiple repeat at position {self.pos - 1}")
+            self._atom_from_group = False
+            node = Repeat(node, minimum, maximum)
 
-            # Possessive quantifiers and lazy modifiers change matching
-            # strategy, not the language — but only for lazy. Possessive
-            # genuinely changes it, so refuse both rather than guess.
-            if self.peek() in {"+", "?"} and isinstance(node, Repeat):
-                nxt = self.peek()
-                if nxt == "+":
-                    raise NonRegular("possessive quantifiers are not supported")
-                self.eat()  # lazy: same language, different match choice
+            # Lazy (`?`) and possessive (`+`) modifiers change the matching
+            # strategy, not the repetition itself. Laziness never changes the
+            # language; possessiveness only does when later text could
+            # backtrack into the repetition, which `_finalize_sticky` decides.
+            if self.peek() == "?":
+                self.eat()
+            elif self.peek() == "+":
+                self.eat()
+                node = Poss(node.node, node.minimum, node.maximum)
         return node
 
     def _try_bounds(self) -> tuple[int, int | None] | None:
@@ -690,7 +824,9 @@ class _Parser:
         ch = self.eat()
 
         if ch == "(":
-            return self._group()
+            node = self._group()
+            self._atom_from_group = True
+            return node
         if ch == "[":
             return self._char_class()
         if ch == ".":
@@ -712,10 +848,13 @@ class _Parser:
             # `_resolve_anchors`, which knows what may surround the anchor.
             if ch == "^" and self.pos == 1:
                 self.anchored_start = True
+                self._atom_is_zero_width = True
                 return Empty()
             if ch == "$" and self.pos == len(self.src):
                 self.anchored_end = True
+                self._atom_is_zero_width = True
                 return Empty()
+            self._atom_is_zero_width = True
             return Anchor(is_start=(ch == "^"))
         if ch in "*+?":
             raise Unsupported(f"nothing to repeat at position {self.pos - 1}")
@@ -724,6 +863,7 @@ class _Parser:
         return CharSet(frozenset(ch))
 
     def _group(self) -> Node:
+        atomic = False
         if self.src.startswith("?", self.pos):
             rest = self.src[self.pos:]
             if rest.startswith("?:"):
@@ -734,7 +874,15 @@ class _Parser:
                 # with backreferences escapes the regular languages.
                 raise Unsupported("lookaround is not supported")
             elif rest.startswith("?>"):
-                raise NonRegular("atomic groups are not supported")
+                # Atomicity changes the language only when the content can
+                # match several ways and later text could backtrack into it;
+                # the position check happens in `_finalize_sticky`.
+                self.pos += 2
+                atomic = True
+            elif rest.startswith(("?P=", "?P>")):
+                # `(?P=name)` is a named backreference and `(?P>name)` a
+                # subroutine call; both are outside the regular languages.
+                raise NonRegular("backreferences make the language non-regular")
             elif rest.startswith("?P<") or rest.startswith("?<"):
                 close = self.src.find(">", self.pos)
                 if close == -1:
@@ -746,7 +894,7 @@ class _Parser:
         if self.peek() != ")":
             raise Unsupported("unbalanced parenthesis")
         self.eat()
-        return node
+        return Atomic(node) if atomic else node
 
     def _escape(self) -> Node:
         if self.pos >= len(self.src):
@@ -762,6 +910,7 @@ class _Parser:
             # every symbol already has a well-defined word-ness, the sentinels
             # included, so naming all 63 would multiply the alphabet — and the
             # DFA — for nothing.
+            self._atom_is_zero_width = True
             return Assert(negated=(ch == "B"))
         if ch in {"A", "Z", "z", "G"}:
             raise Unsupported(f"anchor escape \\{ch} is not supported")
@@ -783,6 +932,8 @@ class _Parser:
             else:
                 raise NonRegular("backreferences make the language non-regular")
         else:
+            if ch.isalpha() and ch not in _PATTERN_ESCAPE_LETTERS:
+                raise Unsupported(f"bad escape \\{ch} at position {self.pos - 1}")
             literal = self._decode_escape(ch)
         self.literals.add(literal)
         return CharSet(frozenset(literal))
@@ -873,12 +1024,30 @@ class _Parser:
                 if esc in _CLASS_ESCAPES:
                     sub, sub_negated = _CLASS_ESCAPES[esc]
                     if sub_negated:
-                        raise Unsupported(
-                            f"negated class escape \\{esc} inside [...] is not supported"
+                        # `[\D]` is exactly `[^\d]`, which is representable —
+                        # but only alone: `[\D0-9]` is not one set, and mixing
+                        # it with a range or further members cannot be
+                        # expressed, so that is refused rather than dropped.
+                        if chars or classes or self.peek() != "]":
+                            raise Unsupported(
+                                f"negated class escape \\{esc} must be the only member of [...]"
+                            )
+                        self.eat()  # the closing bracket
+                        self.literals.update(sub)
+                        return CharSet(
+                            sub,
+                            negated=not negated,
+                            classes=frozenset(esc.lower()),
                         )
                     chars.update(sub)
                     classes.add(esc.lower())
                     continue
+                if esc in "89" or (
+                    esc.isalpha() and esc not in _CLASS_ESCAPE_LETTERS
+                ):
+                    raise Unsupported(
+                        f"bad escape \\{esc} in character class at position {self.pos - 1}"
+                    )
                 ch = self._class_escape_literal(esc)
 
             is_range = (
