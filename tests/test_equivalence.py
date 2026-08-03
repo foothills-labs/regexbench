@@ -89,6 +89,161 @@ def test_anchors_at_the_ends_are_ignored_under_fullmatch():
     assert equivalent(r"^abc$", r"abc").verdict is Verdict.EQUIVALENT
 
 
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        # An anchor that cannot hold — `^` not at the start, `$` not at the
+        # end — matches nothing, exactly as Python's engine treats it. The
+        # parser used to fold it away and declare `a^` equivalent to `a`.
+        (r"a^", r"a"),
+        (r"$a", r"a"),
+        (r"a^b", r"ab"),
+        (r"a|b^", r"a|b"),
+        (r"$a$", r"a"),
+        (r"^a^", r"a"),
+        (r"a$b", r"ab"),
+        (r"(a|$b)", r"a|b"),
+        # An anchor inside a group is positioned by the surrounding text, so
+        # `x(^a)` can never match: `^` needs absolute position zero.
+        (r"x(^a)", r"xa"),
+        (r"(a$)x", r"ax"),
+        (r"x(a|^b)", r"x(a|b)"),
+        # A repetition after the first cannot place `^` at position zero.
+        (r"(^a){2}", r"aa"),
+        (r"(^a){3}", r"aaa"),
+        (r"(a$){2}", r"aa"),
+        (r"(a$){3}", r"aaa"),
+        # At most one iteration can carry the anchor, so two anchored
+        # alternatives are no better than one: both branches would need to
+        # start at position zero.
+        (r"(^a|^b){2}", r"a|b"),
+    ],
+)
+def test_anchors_that_cannot_hold_match_nothing(left, right):
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.DIFFERENT, f"{left} vs {right}: {result.reason}"
+    assert result.witness is not None
+    in_left = re.fullmatch(left, result.witness) is not None
+    in_right = re.fullmatch(right, result.witness) is not None
+    assert in_left != in_right, (
+        f"witness {result.witness!r} does not distinguish {left} from {right}"
+    )
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        # Anchors at branch boundaries are real anchors, so these are valid
+        # patterns — `a|^b` is `a` or `b` at position zero, `(^a)` is `a`.
+        (r"(^a)", r"a"),
+        (r"(a$)", r"a"),
+        (r"a|^b", r"a|b"),
+        (r"(a$|b)", r"a|b"),
+        (r"a|$", r"a?"),
+        # A nullable prefix may shrink to the empty string, so the anchor
+        # still holds: `a?^c` is `c`, `a*^b` is `b`, `b$a*` is `b`.
+        (r"a?^c", r"c"),
+        (r"a*^b", r"b"),
+        (r"b$a*", r"b"),
+        (r"^^", r""),
+        (r"$^", r""),
+        (r"a?^", r""),
+        # Inside a repetition only one iteration can ever carry the anchor,
+        # and the rest match the empty string: `(^a)*` is `a?`.
+        (r"(^a)*", r"a?"),
+        (r"(^a?){2}", r"a?"),
+        (r"(a$)*", r"a?"),
+        (r"(a?$)*", r"a?"),
+        (r"(^a$)*", r"a?"),
+        (r"(a$)+", r"a"),
+        (r"(^a)+", r"a"),
+        (r"x(^a)*", r"x"),
+        (r"x(^a)*y", r"xy"),
+        # With an exact count of two, the anchored iteration must be the first
+        # and the rest empty: `(^a?$){2}` is the empty pattern, `(a?$){2}` is
+        # `a?` (the `$` can ride the empty second iteration).
+        (r"(^a?$){2}", r""),
+        (r"(^(^a?$)$){2}", r""),
+        (r"((^a?)$){2}", r""),
+        (r"(^(a?$)){2}", r""),
+        (r"(a?$){2}", r"a?"),
+        # A nullable body repeats freely around the anchored iteration: the
+        # `^`-bearing one is first, the `$`-bearing one last.
+        (r"(^a?$)*", r"a?"),
+        (r"(^(^a?){1,2})*", r"a?"),
+        (r"(^(^a?){1,2})+", r"a?"),
+        # A nested `^` demands that the text before the group actually be
+        # empty, not merely nullable: `a?(^a)` is `a`, not `a?a`.
+        (r"a?(^a)", r"a"),
+        (r"(a$)(b?)", r"a"),
+        (r"a?(^a?$)", r"a?"),
+        (r"a?(^a?$)(b?)", r"a?"),
+    ],
+)
+def test_anchors_that_can_hold_are_still_real_anchors(left, right):
+    """The anchor side must not collapse to the unanchored pattern.
+
+    `(^a)*` is `a?`, not `a*`: a second iteration could not place `^` at the
+    start of the string. And `a*^b` is `b`, not `a*b` — the anchor forbids a
+    non-empty prefix.
+    """
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.EQUIVALENT, f"{left} vs {right}: {result.reason}"
+
+
+def test_assertions_survive_an_intersection_forced_to_the_empty_string():
+    """The empty-string part of `((\B\B)&(\b))` still carries both boundaries.
+
+    `\B\B` and `\b` cannot both hold at one position, so the intersection is
+    the empty language — including at position zero, where `\B` fails. The
+    parser used to collapse the intersection to the empty string, which turned
+    `x*((\B\B)&(\b))` into `x*` and wrongly matched "".
+    """
+    result = equivalent(r"x*((\B\B)&(\b))", r"\d+a|b*a|b", dialect=Dialect.BRICS)
+    assert result.verdict is Verdict.DIFFERENT
+    assert result.witness is not None
+    assert result.witness != ""
+    in_left = re.fullmatch(r"x*(?=(?:\B\B)$)(?:\b)", result.witness) is not None
+    in_right = re.fullmatch(r"\d+a|b*a|b", result.witness) is not None
+    assert in_left != in_right, (
+        f"witness {result.witness!r} does not distinguish the two"
+    )
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"(^a)",
+        r"a|^b",
+        r"(a$|b)",
+        r"a^",
+        r"$a",
+    ],
+)
+def test_anchors_off_the_pattern_edges_are_refused_under_search(pattern):
+    """SEARCH widens patterns to `.*p.*`, which cannot respect a `^`/`$` that
+    is not at the very edges of the pattern — so those are refused rather than
+    mis-answered."""
+    result = equivalent(pattern, r"a|b", semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.UNSUPPORTED, f"{pattern!r}"
+
+
+def test_anchors_at_the_edges_still_survive_under_search():
+    result = equivalent(r"^a", r"a", semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.DIFFERENT
+
+
+def test_a_trailing_anchor_under_search_binds_to_the_last_branch():
+    # `a|b$` has the `$` on a true pattern edge, so the search reduction can
+    # respect it: `b` is only found at the end of the subject.
+    result = equivalent(r"a|b$", r"a|b", semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.DIFFERENT
+    assert result.witness is not None
+    in_left = re.search(r"a|b$", result.witness) is not None
+    in_right = re.search(r"a|b", result.witness) is not None
+    assert in_left != in_right
+
+
 def test_dot_excludes_newline():
     result = equivalent(r".", r"[^\n]")
     assert result.verdict is Verdict.EQUIVALENT
