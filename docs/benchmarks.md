@@ -60,12 +60,12 @@ from regexbench.datasets import load_regexeval
 
 tasks = load_regexeval("RegexEval.json")
 analyzable = sum(is_regular(t.reference, dialect=t.dialect) for t in tasks)
-print(f"{analyzable}/{len(tasks)}")     # 629/762 = 82.5%
+print(f"{analyzable}/{len(tasks)}")     # 707/762 = 92.8%
 ```
 
 | Corpus | References this engine can parse |
 | --- | --- |
-| Re(gEx|DoS)Eval | 82.5% |
+| Re(gEx|DoS)Eval | 92.8% |
 | KB13 | 100% |
 | NL-RX-Synth / NL-RX-Turk | 100% |
 

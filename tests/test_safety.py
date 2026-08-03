@@ -25,9 +25,19 @@ def test_ordinary_patterns_are_not_flagged(pattern):
 def test_a_bounded_repeat_does_not_explode(pattern):
     # {m} or {m,n} with a finite n fixes the number of repetitions, so
     # backtracking is bounded by the text length raised to that constant
-    # power at worst — polynomial, not exponential.
+    # power at worst — polynomial, not exponential. Not SAFE either: at
+    # `(a+){10}` a few dozen characters already take seconds.
     result = screen(pattern, empirical=False)
-    assert result.risk is not Risk.EXPONENTIAL, result.reason
+    assert result.risk is Risk.POLYNOMIAL, result.reason
+
+
+@pytest.mark.parametrize("pattern", [r"(a+){1}", r"(ab){10}", r"a+", r"[a-z]+"])
+def test_bounded_repeats_without_ambiguity_are_safe(pattern):
+    # The bound alone is not the risk — the body has to be ambiguous. `(ab){10}`
+    # has exactly one way to consume each iteration, so there is nothing to
+    # backtrack over.
+    result = screen(pattern, empirical=False)
+    assert result.risk is Risk.SAFE, result.reason
 
 
 @pytest.mark.parametrize("pattern", [r"(a+)+", r"(a|a)*"])

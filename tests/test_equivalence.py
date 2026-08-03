@@ -192,7 +192,7 @@ def test_anchors_that_can_hold_are_still_real_anchors(left, right):
 
 
 def test_assertions_survive_an_intersection_forced_to_the_empty_string():
-    """The empty-string part of `((\B\B)&(\b))` still carries both boundaries.
+    r"""The empty-string part of `((\B\B)&(\b))` still carries both boundaries.
 
     `\B\B` and `\b` cannot both hold at one position, so the intersection is
     the empty language — including at position zero, where `\B` fails. The
@@ -462,6 +462,17 @@ def test_bad_class_escapes_are_refused(pattern):
 
 
 @pytest.mark.parametrize(
+    "pattern", [r"[\d-z]", r"[a-\d]", r"[\w-a]", r"[\d-\w]", r"[^\d-z]", r"[a-\q]"]
+)
+def test_a_shorthand_class_cannot_bound_a_range(pattern):
+    """`[\\d-z]` is "bad character range" in Python — a class has no code
+    point to range from — so it is refused rather than read as `\\d`, `-`, `z`.
+    """
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+@pytest.mark.parametrize(
     "left,right",
     [
         (r"[\D]", r"[^\d]"),
@@ -493,7 +504,6 @@ def test_negated_class_escape_must_be_the_only_member():
         (r"a{2, 3}", r"a\{2, 3\}"),
         (r"a{2,3 }", r"a\{2,3 \}"),
         (r"a{2,3", r"a\{2,3"),
-        (r"a{,3}", r"a\{,3\}"),
         (r"a{2,3,}", r"a\{2,3,\}"),
         (r"a{2,3}{2, 3}", r"a{2,3}\{2, 3\}"),
         (r"\b{2, 3}", r"\b\{2, 3\}"),
@@ -505,6 +515,24 @@ def test_malformed_quantifier_text_is_literal_text(left, right):
     result = equivalent(left, right)
     assert result.verdict is Verdict.EQUIVALENT, result.reason
     assert equivalent(left, "aa").verdict is Verdict.DIFFERENT, result.reason
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"a{,3}", r"a{0,3}"),
+        (r"a{,1}", r"a?"),
+        (r"a{,0}", r""),
+        (r"[ab]{,2}", r"[ab]{0,2}"),
+    ],
+)
+def test_an_omitted_lower_bound_is_zero(left, right):
+    """`{,n}` is `{0,n}` in Python, not literal text — `a{,3}` matches "".
+
+    The neighbouring `a{}` really is literal, so the two cases have to be
+    told apart rather than lumped together as "malformed".
+    """
+    assert equivalent(left, right).verdict is Verdict.EQUIVALENT
 
 
 @pytest.mark.parametrize(
