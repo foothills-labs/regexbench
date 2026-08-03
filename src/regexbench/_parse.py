@@ -22,6 +22,7 @@ should not get a verdict from a tool whose other half runs ``re``.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 
@@ -40,6 +41,15 @@ UNNAMED_WORD = "\x00UNNAMED_W"
 UNNAMED_SPACE = "\x00UNNAMED_S"
 UNNAMED_OTHER = "\x00UNNAMED_O"
 SENTINELS = (UNNAMED_DIGIT, UNNAMED_WORD, UNNAMED_SPACE, UNNAMED_OTHER)
+
+# Whether `\B` matches the empty string on *this* interpreter. CPython 3.14
+# changed it to (gh-124130), making `\B` exactly the negation of `\b`; 3.13 and
+# earlier refuse it, so `\B` there is the empty language under a full match.
+#
+# Probed rather than compared against a version number: the running interpreter
+# is the authority, since `check()` executes patterns with that same `re`. A
+# backport or a rebuilt interpreter would make a version test lie.
+NEGATED_BOUNDARY_MATCHES_EMPTY = re.search(r"\B", "") is not None
 
 _DIGITS = frozenset("0123456789")
 _WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -167,6 +177,9 @@ class Assert(Node):
     Regular despite looking like lookaround — the condition depends only on the
     two characters either side of the position, so a finite automaton can carry
     it in its state.
+
+    The empty string is the one place the two are not exact opposites, and only
+    on some interpreters: see :data:`NEGATED_BOUNDARY_MATCHES_EMPTY`.
     """
 
     negated: bool = False
