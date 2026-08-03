@@ -1,6 +1,6 @@
 [project]
 name = "regexbench"
-version = "0.2.0"
+version = "0.2.1"
 description = "Evaluate generated regular expressions: semantic equivalence, correctness, and ReDoS safety."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Topic :: Security",
   "Topic :: Text Processing",

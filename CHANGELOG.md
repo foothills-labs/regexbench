@@ -5,17 +5,28 @@ Notable changes to `regexbench`. Format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with the caveat
 that a 0.x line makes no stability promise.
 
-## 0.2.0 — unreleased
+## 0.2.1 — unreleased
 
-### Known limitations
+### Fixed
 
-- **Python 3.13 and below.** CPython 3.14 changed `\B` to match the empty
-  string ([gh-124130](https://github.com/python/cpython/issues/124130)), so it
-  is now always the opposite of `\b`. This engine still models the older
-  behaviour, and its own differential tests catch the disagreement — 13 of them
-  fail on 3.14. Making the boundary model version-aware is the fix; until then
-  3.14 is not claimed.
+- **Word boundaries on CPython 3.14.** 3.14 changed `\B` to match the empty
+  string ([gh-124130](https://github.com/python/cpython/issues/124130)), making
+  it exactly the negation of `\b`; 3.13 and earlier refuse it there, which made
+  `\B` the empty language under a full match. 0.2.0 modelled only the older
+  behaviour, so on 3.14 it disagreed with the `re` it was scoring against — 13
+  of its own differential tests caught this, which is what they are for.
 
+  The rule is now probed at import rather than compared against
+  `sys.version_info`. The running interpreter is the authority, because
+  `check()` executes patterns with that same `re`; a backported fix or a
+  rebuilt interpreter would make a version test lie.
+
+### Added
+
+- **Python 3.14 is supported and tested.** The classifier and the CI matrix
+  entry are back, and the suite passes on 3.10 through 3.14.
+
+## 0.2.0 — 2026-08-02
 
 First published release. 0.1.0 existed as a git tag's worth of code and was
 never uploaded, so everything below is new to anyone installing this.
