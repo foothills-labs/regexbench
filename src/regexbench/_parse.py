@@ -7,8 +7,17 @@ silently mishandled downstream.
 
 Supported: literals, escapes, ``.``, character classes with ranges and
 negation, ``*`` ``+`` ``?`` and ``{m,n}`` repetition, alternation, and
-grouping (capturing or not). Anchors are accepted only at the ends, since
-equivalence is defined over full matches.
+grouping (capturing or not).
+
+Anchors are resolved wherever they appear rather than only at the ends: under
+full-match semantics ``^`` holds only if everything before it is empty, so
+``a^`` is the empty language and ``a?^c`` is ``c``. Under SEARCH semantics an
+anchor away from the ends is still refused, since the ``.*p.*`` rewrite has no
+way to express it.
+
+Where Python's own parser refuses a pattern — ``a**``, ``\\b*``, ``\\q``,
+``[\\d-z]`` — this refuses it too. A pattern that cannot run under ``re``
+should not get a verdict from a tool whose other half runs ``re``.
 """
 
 from __future__ import annotations
@@ -453,18 +462,25 @@ def _resolve_anchors(
             # `^` sits after the `b$`... everything must be the empty string,
             # or the concatenation matches nothing.
             if all(_nullable(p) for p in parts):
-                return Empty(), True
+                return _join([_epsilon_restrict(p) for p in parts]), True
             return CharSet(frozenset()), False
         if start != -1 or end != len(parts):
             # The anchors at `start` and `end` hold: what lies before the
             # last start-anchor and after the first end-anchor is empty, and
             # the two anchors are themselves the identity. Only the middle
             # remains, still inside the surrounding match.
+            #
+            # "Empty" is not "gone": a `\b` in the collapsed region consumes
+            # nothing but still constrains the position, and `re` fails
+            # `($)\b` on the empty subject for exactly that reason. The
+            # epsilon-restriction keeps those assertions and drops the rest.
+            front = [_epsilon_restrict(p) for p in parts[:start]] if start >= 0 else []
+            back = [_epsilon_restrict(p) for p in parts[end + 1 :]]
             middle = Concat(tuple(parts[start + 1 : end]))
-            resolved, survived = _resolve_anchors(
+            resolved, _ = _resolve_anchors(
                 middle, prefix_nullable=prefix_nullable, suffix_nullable=suffix_nullable
             )
-            return resolved, True or survived
+            return _join([*front, resolved, *back]), True
         # No anchors at this level; every part may carry its own. A nested
         # `^` holds only when the actual text before the part is empty, a
         # nested `$` only when the text after it is — "can be empty" is not
@@ -790,10 +806,12 @@ class _Parser:
         digits = ""
         while self.peek() is not None and self.peek().isdigit():
             digits += self.eat()
-        if not digits:
+        if not digits and self.peek() != ",":
+            # `a{}` really is literal text; `a{,3}` is not — Python reads an
+            # omitted lower bound as zero, so `{,3}` is `{0,3}`.
             self.pos = start
             return None
-        low = int(digits)
+        low = int(digits) if digits else 0
         if self.peek() == "}":
             self.eat()
             return low, low
@@ -1039,6 +1057,15 @@ class _Parser:
                             negated=not negated,
                             classes=frozenset(esc.lower()),
                         )
+                    if self.peek() == "-" and self.src[self.pos + 1 : self.pos + 2] not in (
+                        "",
+                        "]",
+                    ):
+                        # `[\d-z]` is "bad character range" in Python: a
+                        # shorthand class has no code point to range from.
+                        raise Unsupported(
+                            f"bad character range \\{esc}-{self.src[self.pos + 1]}"
+                        )
                     chars.update(sub)
                     classes.add(esc.lower())
                     continue
@@ -1059,7 +1086,14 @@ class _Parser:
                 self.eat()
                 end = self.eat()
                 if end == "\\":
-                    end = self._class_escape_literal(self.eat())
+                    esc = self.eat()
+                    if esc in _CLASS_ESCAPES:
+                        raise Unsupported(f"bad character range {ch}-\\{esc}")
+                    if esc in "89" or (esc.isalpha() and esc not in _CLASS_ESCAPE_LETTERS):
+                        raise Unsupported(
+                            f"bad escape \\{esc} in character class at position {self.pos - 1}"
+                        )
+                    end = self._class_escape_literal(esc)
                 if ord(end) < ord(ch):
                     raise Unsupported(f"reversed range {ch}-{end}")
                 if ord(end) - ord(ch) > 0x10000:

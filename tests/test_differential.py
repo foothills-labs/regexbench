@@ -370,3 +370,91 @@ def test_shorthand_classes_agree_with_re_over_unicode(
         )
 
     assert checked > 40, "generator produced too few analyzable pairs to be meaningful"
+
+
+# --------------------------------------------------------------------------
+# Escapes and misplaced anchors.
+#
+# These two atom sets exist because their absence is what let two families of
+# wrong verdicts ship: the generator above never emits `\x41` or an anchor
+# anywhere but the pattern ends, so it could not have caught either. A
+# generator that cannot produce a construct is not evidence about it.
+
+ESCAPE_ATOMS = [
+    r"\x61", r"\U00000063", r"\a", r"\007", r"\101", r"\N{BULLET}",
+    r"[\x61-\x63]", r"[\a]", r"\.", r"\-", r"\\", "a", "b", r"[\d]",
+]
+ESCAPES = generator(ESCAPE_ATOMS)
+ESCAPE_CORPUS = corpus("ab\x07\x01A•.-\\", longest=2)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_escape_verdicts_agree_with_re(seed: int) -> None:
+    """`\\x41` is the character "A", not the three characters "x41"."""
+    rng = random.Random(seed)
+    checked = 0
+
+    for _ in range(150):
+        left, right = ESCAPES(rng), ESCAPES(rng)
+        try:
+            compiled_left, compiled_right = re.compile(left), re.compile(right)
+        except re.error:
+            continue
+
+        result = equivalent(left, right)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+        cross_check(
+            result,
+            matcher(compiled_left),
+            matcher(compiled_right),
+            ESCAPE_CORPUS,
+            f"{left!r} and {right!r}",
+        )
+
+    assert checked > 50, "generator produced too few analyzable pairs to be meaningful"
+
+
+# Anchors *inside* the pattern, which the reduction has to resolve rather than
+# drop, and mixed with `\b` — an anchor collapsing a region to the empty string
+# does not license discarding the assertions sitting in it.
+NESTED_ANCHOR_ATOMS = [
+    "a", "b", "^", "$", "(^)", "($)", "(^a)", "(a$)", "(^a|b)", "(a|b$)",
+    r"\b", r"\B", "a?", "b*", "(ab)", "[ab]",
+]
+NESTED_ANCHORS = generator(NESTED_ANCHOR_ATOMS)
+NESTED_ANCHOR_CORPUS = corpus("ab\n", longest=3)
+
+
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(6))
+def test_nested_anchor_verdicts_agree_with_re(seed: int, semantics: Semantics) -> None:
+    """`a^` matches nothing and `($)\\b` matches nothing — neither is `a` or ``."""
+    rng = random.Random(seed)
+    method = method_for(semantics)
+    checked = 0
+
+    for _ in range(150):
+        left, right = NESTED_ANCHORS(rng), NESTED_ANCHORS(rng)
+        try:
+            compiled_left, compiled_right = re.compile(left), re.compile(right)
+        except re.error:
+            continue
+
+        result = equivalent(left, right, semantics=semantics)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+        cross_check(
+            result,
+            matcher(compiled_left, method),
+            matcher(compiled_right, method),
+            NESTED_ANCHOR_CORPUS,
+            f"{method} of {left!r} and {right!r}",
+        )
+
+    # Lower under SEARCH: anchors off the pattern ends are refused there, so
+    # most of what this generator emits is UNSUPPORTED by design.
+    floor = 8 if semantics is Semantics.SEARCH else 40
+    assert checked > floor, "generator produced too few analyzable pairs to be meaningful"

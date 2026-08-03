@@ -67,6 +67,12 @@ def _structural(pattern: str) -> SafetyResult:
             reason="a quantifier wraps alternation whose branches overlap, e.g. (a|a)* — "
             "the engine retries every split",
         )
+    if _bounded_nested_quantifier(ast):
+        return SafetyResult(
+            Risk.POLYNOMIAL,
+            reason="a bounded quantifier wraps an unbounded one, e.g. (a+){10} — "
+            "the bound caps the nesting, but the engine still tries every split",
+        )
     if _adjacent_quantifiers(ast):
         return SafetyResult(
             Risk.POLYNOMIAL,
@@ -82,6 +88,23 @@ def _nested_quantifier(node: Node) -> bool:
         if _unbounded(node) and _contains_unbounded_repeat(node.node):
             return True
     return any(_nested_quantifier(child) for child in _children(node))
+
+
+def _bounded_nested_quantifier(node: Node) -> bool:
+    """A bounded repeat wrapping an ambiguous body: `(a+){10}`, `(a|a){10}`.
+
+    Not exponential — the bound caps how deep the nesting goes — but not safe
+    either: the engine still tries every way to split the subject into that
+    many pieces, which is polynomial of degree the bound and is already
+    unusable at `(a+){10}` on a few dozen characters.
+    """
+    if isinstance(node, Repeat) and not _unbounded(node) and _repeats(node):
+        inner = node.node
+        if _contains_unbounded_repeat(inner):
+            return True
+        if isinstance(inner, Alternate) and _branches_overlap(inner):
+            return True
+    return any(_bounded_nested_quantifier(child) for child in _children(node))
 
 
 def _ambiguous_alternation(node: Node) -> bool:
@@ -129,6 +152,11 @@ def _sets_overlap(left: Node, right: Node) -> bool:
 
 def _unbounded(node: Repeat) -> bool:
     return node.maximum is None
+
+
+def _repeats(node: Repeat) -> bool:
+    """Whether the body can run more than once — where split ambiguity starts."""
+    return node.maximum is None or node.maximum > 1
 
 
 def _contains_unbounded_repeat(node: Node) -> bool:
