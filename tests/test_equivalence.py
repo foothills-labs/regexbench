@@ -320,7 +320,7 @@ def test_shorthand_classes_are_unicode_aware(left, right, witness):
 
 
 # --------------------------------------------------------------------------
-# Escape values: \\xHH, \\uHHHH, \\UHHHHHHHH, \\a, \\e, and octal.
+# Escape values: \\xHH, \\uHHHH, \\UHHHHHHHH, \\a, and octal.
 
 @pytest.mark.parametrize(
     "left,right",
@@ -425,3 +425,199 @@ def test_corpus_patterns_using_escapes_score_perfectly():
     ):
         report = check(pattern, Task(positives=positives, negatives=negatives))
         assert report.perfect, f"{pattern!r} failed: {report}"
+
+
+# --------------------------------------------------------------------------
+# Parser strictness: refuse what Python refuses, accept what it accepts.
+#
+# These mirror `re` on 3.11: `\q` is a "bad escape", `\b*` is "nothing to
+# repeat", `a**` is "multiple repeat", and `a{2, 3}` is literal text.
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"\q", r"\p", r"\p{L}", r"\k", r"\e", r"\c", r"\i", r"\l", r"\P",
+        r"\E", r"\é",
+    ],
+)
+def test_bad_letter_escapes_are_refused(pattern):
+    """Python rejects unknown letter escapes. Reading `\\q` as literal "q"
+    would flip the verdict on the escaped letter."""
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"[\q]", r"[\e]", r"[\B]", r"[\A]", r"[\z]", r"[\G]", r"[\p]", r"[\8]",
+        r"[\9]", r"[\é]",
+    ],
+)
+def test_bad_class_escapes_are_refused(pattern):
+    """In a class too, Python rejects unknown escapes instead of matching the
+    escaped letter literally; `[\\B]` is not a literal backslash-B."""
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"[\D]", r"[^\d]"),
+        (r"[\S]", r"[^\s]"),
+        (r"[\W]", r"[^\w]"),
+        (r"[^\D]", r"\d"),
+    ],
+)
+def test_negated_class_escapes_inside_classes(left, right):
+    """`[\\D]` is the same language as `[^\\d]` — a negated shorthand is legal
+    inside a class, and both spellings must agree."""
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
+
+
+def test_negated_class_escape_must_be_the_only_member():
+    """`[\\D]` is representable; `[\\D0-9]` is not a single set, so it is
+    refused rather than silently dropped."""
+    assert equivalent(r"[\D]", r"\d").verdict is Verdict.DIFFERENT
+    assert equivalent(r"[\d\D]", "x").verdict is Verdict.UNSUPPORTED
+    assert equivalent(r"[\D0-9]", "x").verdict is Verdict.UNSUPPORTED
+    assert equivalent(r"[\D-a]", "x").verdict is Verdict.UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"a{2,2,3}", r"a\{2,2,3\}"),
+        (r"a{2, 3}", r"a\{2, 3\}"),
+        (r"a{2,3 }", r"a\{2,3 \}"),
+        (r"a{2,3", r"a\{2,3"),
+        (r"a{,3}", r"a\{,3\}"),
+        (r"a{2,3,}", r"a\{2,3,\}"),
+        (r"a{2,3}{2, 3}", r"a{2,3}\{2, 3\}"),
+        (r"\b{2, 3}", r"\b\{2, 3\}"),
+    ],
+)
+def test_malformed_quantifier_text_is_literal_text(left, right):
+    """`a{2, 3}` is not a quantifier: `re` compiles the braces as literal
+    text, and the parser must not read `{2` as a bound."""
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
+    assert equivalent(left, "aa").verdict is Verdict.DIFFERENT, result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"\b*", r"\b?", r"\b{2}", r"\B*", r"^+", r"^?", r"^*", r"$?", r"a^+", r"a\b*"],
+)
+def test_quantifying_a_zero_width_assertion_is_refused(pattern):
+    """`\b*` is "nothing to repeat" in Python; repeating an assertion changes
+    what the assertion constrains."""
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+def test_assertions_inside_groups_may_be_quantified():
+    """The refusal is about the bare assertion: wrapped in a group, `(\b)?`
+    compiles and matches the same empty string as repeating it. (Python's
+    `\\b` fails on the empty subject, so `(\b)` itself matches nothing.)"""
+    assert equivalent(r"(\b)?", "").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"(\b)*", "").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"()*", "").verdict is Verdict.EQUIVALENT
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"a*{3}", r"a**", r"a*?*", r"a{2}?*", r"a{0}*", r"a{2,3}?+", r"a*+?", r"a{2,3}+{2}"],
+)
+def test_stacking_quantifiers_is_refused(pattern):
+    """`a**` is "multiple repeat" in Python, including possessive and lazy
+    stacks; the second quantifier changes what the first repeats."""
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+def test_lazy_quantifiers_are_transparent():
+    """Laziness changes match choice, not the language, so it is always
+    analyzable."""
+    assert equivalent(r"a+?", r"a+").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"a??", r"a?").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"a{2}?", r"a{2}").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"a{2,3}?", r"a{2,3}").verdict is Verdict.EQUIVALENT
+
+
+def test_group_wrapped_repeats_may_be_requantified():
+    """`(a+)+` compiles in Python — the quantifier applies to the group, not
+    the inner repeat — and repeats the same language."""
+    assert equivalent(r"(a+)+", r"a+").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"(a*)*", r"a*").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"(a+)?", r"a*").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"(a?){2}", r"a?a?").verdict is Verdict.EQUIVALENT
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"a{2,3}+", r"a{2,3}"),
+        (r"a*+", r"a*"),
+        (r"a++", r"a+"),
+        (r"a?+", r"a?"),
+    ],
+)
+def test_possessive_quantifier_at_branch_end(left, right):
+    """A possessive quantifier seals the repetition count, which only matters
+    when later text could backtrack into it; at the end of a branch it matches
+    exactly what its plain form matches."""
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"a{2,3}+b", r"(a{2,3}+)*", r"a*+b", r"(a{2,3}+|b)c", r"(a|ab){2}+", r"(a|b){2,3}+"],
+)
+def test_possessive_quantifier_mid_pattern_is_refused(pattern):
+    """Mid-pattern, `a{2,3}+b` genuinely differs from `a{2,3}b` — the sealed
+    count cannot be given back — and over an ambiguous atom even a final
+    `(a|ab){2}+` differs from `(a|ab){2}`. Both are refused rather than
+    mis-scored."""
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"(?>a)", r"a"),
+        (r"(?>a)b", r"ab"),
+        (r"(?>ab)", r"ab"),
+        (r"(?>(ab))+", r"(ab)+"),
+    ],
+)
+def test_atomic_groups_with_unique_matches(left, right):
+    """An atomic group only changes the language when its content could match
+    several ways; content that matches exactly one way is transparent."""
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"(?>a|ab)b", r"(?>a+)b", r"(?>a|b)*", r"(?>a|ab)", r"(?>a+)", r"(?>a|b)"],
+)
+def test_atomic_groups_with_ambiguous_content_are_refused(pattern):
+    """`(?>a|ab)` seals the alternation's greedy choice, so it fullmatches
+    only "a" — not `a|ab`; `(?>a|ab)b` differs from `(a|ab)b` on "aab". Both
+    are refused rather than answered with the plain-group reading."""
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+@pytest.mark.parametrize("pattern", [r"(?P=a)a", r"(?P>name)", r"(a)\1"])
+def test_backreferences_are_undecidable(pattern):
+    """Backreferences put the language outside the regular ones, so the
+    verdict is UNDECIDABLE rather than a guess — including the named and
+    subroutine spellings, which used to fall through to UNSUPPORTED."""
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNDECIDABLE, result.reason
