@@ -67,6 +67,12 @@ def _structural(pattern: str) -> SafetyResult:
             reason="a quantifier wraps alternation whose branches overlap, e.g. (a|a)* — "
             "the engine retries every split",
         )
+    if _bounded_nested_quantifier(ast):
+        return SafetyResult(
+            Risk.POLYNOMIAL,
+            reason="a bounded quantifier wraps an unbounded one, e.g. (a+){10} — "
+            "the bound caps the nesting, but the engine still tries every split",
+        )
     if _adjacent_quantifiers(ast):
         return SafetyResult(
             Risk.POLYNOMIAL,
@@ -79,9 +85,26 @@ def _structural(pattern: str) -> SafetyResult:
 def _nested_quantifier(node: Node) -> bool:
     """A repeat whose body can itself repeat, and can match more than one way."""
     if isinstance(node, Repeat):
-        if _unbounded(node) and _contains_unbounded_repeat(node.node):
+        if _unbounded(node) and _contains_variable_repeat(node.node):
             return True
     return any(_nested_quantifier(child) for child in _children(node))
+
+
+def _bounded_nested_quantifier(node: Node) -> bool:
+    """A bounded repeat wrapping an ambiguous body: `(a+){10}`, `(a|a){10}`.
+
+    Not exponential — the bound caps how deep the nesting goes — but not safe
+    either: the engine still tries every way to split the subject into that
+    many pieces, which is polynomial of degree the bound and is already
+    unusable at `(a+){10}` on a few dozen characters.
+    """
+    if isinstance(node, Repeat) and not _unbounded(node) and _repeats(node):
+        inner = node.node
+        if _contains_variable_repeat(inner):
+            return True
+        if isinstance(inner, Alternate) and _branches_overlap(inner):
+            return True
+    return any(_bounded_nested_quantifier(child) for child in _children(node))
 
 
 def _ambiguous_alternation(node: Node) -> bool:
@@ -99,8 +122,8 @@ def _adjacent_quantifiers(node: Node) -> bool:
             if (
                 isinstance(left, Repeat)
                 and isinstance(right, Repeat)
-                and _unbounded(left)
-                and _unbounded(right)
+                and _variable_length(left)
+                and _variable_length(right)
                 and _sets_overlap(left.node, right.node)
             ):
                 return True
@@ -128,13 +151,48 @@ def _sets_overlap(left: Node, right: Node) -> bool:
 
 
 def _unbounded(node: Repeat) -> bool:
+    return node.maximum is None
+
+
+def _repeats(node: Repeat) -> bool:
+    """Whether the body can run more than once — where split ambiguity starts."""
     return node.maximum is None or node.maximum > 1
 
 
-def _contains_unbounded_repeat(node: Node) -> bool:
-    if isinstance(node, Repeat) and _unbounded(node):
-        return True
-    return any(_contains_unbounded_repeat(child) for child in _children(node))
+def _variable_length(node: Repeat) -> bool:
+    """Whether the repeat can match more than one number of characters."""
+    return node.maximum is None or node.maximum > node.minimum
+
+
+def _wide(node: Repeat) -> bool:
+    """Whether the repeat spans at least two *positive* lengths.
+
+    `[0-9]{0,7}` does, and one of those inside an outer `+` is enough to make
+    splitting a run of digits combinatorial — `^([1-9][0-9]{0,7})+$` is
+    unusable at two dozen characters. A lone `\d?` does not: it varies by one
+    optional character, and CPython's empty-loop guard keeps `(\d?)*` linear.
+    """
+    return node.maximum is None or node.maximum > max(node.minimum, 1)
+
+
+def _variable_repeats(node: Node) -> list[Repeat]:
+    """Every repeat below `node` whose width is not fixed."""
+    found = [node] if isinstance(node, Repeat) and _variable_length(node) else []
+    for child in _children(node):
+        found.extend(_variable_repeats(child))
+    return found
+
+
+def _contains_variable_repeat(node: Node) -> bool:
+    """Whether an outer quantifier has more than one way to consume `node`.
+
+    One wide repeat does it on its own. So does a run of narrow ones: every
+    atom in `((\.)?([\w-]?)(\.)?)` is a single optional, and CPython copes
+    with any one of them, but six in a row give the outer `+` combinatorially
+    many ways to divide the same text, and it hangs.
+    """
+    found = _variable_repeats(node)
+    return any(_wide(r) for r in found) or len(found) >= 2
 
 
 def _children(node: Node) -> tuple[Node, ...]:
