@@ -229,9 +229,12 @@ and a 0% pass@1 would read as a model failing a question nobody asked it.
 questions. The plain figure counts undecidable comparisons as failures: how
 much of the corpus was *verified* correct, a lower bound that cannot flatter.
 The `(decided)` figure drops those tasks from the denominator: how much of what
-could be checked was correct, the model alone. On KB13 the gold answers
-themselves score 51.1% and 100.0% — a 49-point spread that is not a model
-result at all, but the `\b` gap in this engine.
+could be checked was correct, the model alone. On Re(gEx|DoS)Eval the spread is
+the engine's coverage: 82.5% of its references parse under the search
+semantics it is scored with, so on the other 17.5% every candidate that is not
+textually identical comes back undecidable and scores zero under the first
+reading. (KB13 used to be the example here, when word boundaries were refused;
+all three dk.brics corpora parse in full now.)
 
 ## CLI
 
