@@ -64,16 +64,15 @@ def test_backreferences_are_undecidable_not_guessed(pattern):
 
 
 @pytest.mark.parametrize("pattern", [r"(?=a)b", r"(?!a)b", r"(?<=a)b", r"(?<!a)b"])
-def test_lookaround_is_unsupported_not_undecidable(pattern):
-    """Lookaround alone preserves regularity — this is decidable, just unbuilt.
-
-    Only combining lookaround with backreferences escapes the regular
-    languages. Calling it undecidable would be a claim about the problem when
-    it is a statement about this engine.
-    """
+def test_lookaround_is_decided_not_undecidable(pattern):
+    """Lookaround alone stays in the regular languages, so equivalence with a
+    plain pattern must be decided, not refused — and not escaped to
+    undecidable, which would be a claim about the problem rather than this
+    engine."""
     result = equivalent(pattern, r"a")
-    assert result.verdict is Verdict.UNSUPPORTED
-    assert not is_regular(pattern), "not analyzable here, whatever the theory says"
+    assert result.verdict is Verdict.DIFFERENT
+    assert result.witness is not None
+    assert is_regular(pattern)
 
 
 def test_undecidable_is_reported_for_either_side():
@@ -213,7 +212,6 @@ def test_assertions_survive_an_intersection_forced_to_the_empty_string():
 @pytest.mark.parametrize(
     "pattern",
     [
-        r"(^a)",
         r"a|^b",
         r"(a$|b)",
         r"a^",
@@ -223,9 +221,21 @@ def test_assertions_survive_an_intersection_forced_to_the_empty_string():
 def test_anchors_off_the_pattern_edges_are_refused_under_search(pattern):
     """SEARCH widens patterns to `.*p.*`, which cannot respect a `^`/`$` that
     is not at the very edges of the pattern — so those are refused rather than
-    mis-answered."""
+    mis-answered. A transparent group around the anchor is still the edge,
+    which the fold below covers."""
     result = equivalent(pattern, r"a|b", semantics=Semantics.SEARCH)
     assert result.verdict is Verdict.UNSUPPORTED, f"{pattern!r}"
+
+
+def test_anchors_behind_a_transparent_group_still_fold_under_search():
+    # `(^a)` is `^a`: the group consumes nothing, so the anchor is the true
+    # pattern edge and search must respect it.
+    result = equivalent(r"(^a)", r"a|b", semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.DIFFERENT
+    assert result.witness is not None
+    in_left = re.search(r"(^a)", result.witness) is not None
+    in_right = re.search(r"a|b", result.witness) is not None
+    assert in_left != in_right
 
 
 def test_anchors_at_the_edges_still_survive_under_search():

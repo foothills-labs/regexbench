@@ -5,6 +5,43 @@ Notable changes to `regexbench`. Format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with the caveat
 that a 0.x line makes no stability promise.
 
+## Unreleased
+
+### Added
+
+- **Lookaround is decided, not refused.** `(?=…)`, `(?!…)`, fixed-width
+  `(?<=…)` and `(?<!…)` now build into the automata instead of coming back
+  `UNSUPPORTED`. The pattern is compiled with each assertion reduced to an
+  edge on a private marker symbol, intersected with one constraint automaton
+  per assertion — a pending-set machine for lookaheads (a suffix property,
+  so each fired marker defers its check to the end) and a sliding-window
+  machine for lookbehinds (a prefix property, certified on the spot) — and
+  the markers are then projected away. Assertions nested inside assertions
+  chain their markers so the outer constraint can certify them too.
+
+  The semantics are pinned to Python's `re` by a differential fuzz round over
+  the lookaround closure (300+ generated patterns, zero disagreements with
+  `re.fullmatch`) and by the corpus tasks whose references lean on lookaround.
+  Combined with backreferences a lookaround still leaves the regular
+  languages, and now stays `UNDECIDABLE` for that reason rather than being
+  confused with what this engine can answer.
+
+- **An anchored `^`/`$` behind zero-width atoms folds under SEARCH.** The
+  anchor folding that handled the literal first and last characters of a
+  pattern now also looks through a leading run of lookarounds, boundaries
+  and empty groups: `(?!^0*$)(?!^0*\.0*$)^\d{1,5}(…)$` keeps its search
+  semantics. An anchor that a consuming atom separates from the edge is still
+  refused rather than mis-answered.
+
+### Changed
+
+- **Benchmark coverage grows.** 670/762 = 87.9% of Re(gEx|DoS)Eval's SEARCH
+  references parse now, up from 629/762 = 82.5% (FULLMATCH 741/762 = 97.2%).
+  The remaining lookaround refs are refused either because they combine the
+  assertion with a backreference, or because a non-edge anchor makes the
+  SEARCH reduction impossible. `equivalence()` reports the new verdicts in
+  its docstring.
+
 ## 0.3.0 — 2026-08-03
 
 ### Fixed

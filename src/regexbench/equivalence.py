@@ -50,7 +50,9 @@ def equivalent(
 
     Returns UNDECIDABLE — not a guess — when either pattern uses
     backreferences, which put it outside the regular languages. Lookaround
-    stays regular and comes back UNSUPPORTED instead: decidable, unimplemented.
+    stays inside them and is decided exactly: lookahead and fixed-width
+    lookbehind build into the automata. What it cannot answer comes back
+    UNSUPPORTED with a reason."
 
     Under SEARCH semantics the question becomes "do these two patterns accept
     the same *subject strings* when searched", which is the right question for
@@ -60,8 +62,8 @@ def equivalent(
     if left == right:
         # Reflexivity needs no automaton. A pattern's language is a function of
         # its text, so identical text denotes identical languages under any
-        # dialect and either semantics — including for backreferences and
-        # lookaround, where nothing else here can reach a verdict. The reference
+        # dialect and either semantics — including for backreferences, where
+        # nothing else here can reach a verdict. The reference
         # tooling in this field does the same: Re(gEx|DoS)Eval's DFA_Equ
         # evaluation returns true on string equality before invoking
         # regex_dfa_equals.jar at all, so matching that keeps scores comparable.

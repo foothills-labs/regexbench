@@ -62,21 +62,23 @@ tasks = load_regexeval("RegexEval.json")
 analyzable = sum(
     is_regular(t.reference, semantics=t.semantics, dialect=t.dialect) for t in tasks
 )
-print(f"{analyzable}/{len(tasks)}")     # 629/762 = 82.5%
+print(f"{analyzable}/{len(tasks)}")     # 670/762 = 87.9%
 ```
 
 | Corpus | References this engine can parse |
 | --- | --- |
-| Re(gEx|DoS)Eval | 82.5% |
+| Re(gEx|DoS)Eval | 87.9% |
 | KB13 | 100% |
 | NL-RX-Synth / NL-RX-Turk | 100% |
 
 **Pass the corpus's own `semantics`.** It changes the answer, and the default
-flatters this corpus: 705 of the 762 references parse under FULLMATCH (92.5%)
-but only 629 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The
-difference is the 10.4% that anchor away from the pattern ends — resolved
-exactly under a full match, refused under a search, where the `.*p.*` rewrite
-has nowhere to put them.
+flatters this corpus: 741 of the 762 references parse under FULLMATCH (97.2%)
+but 670 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The difference
+is the 9.3% that anchor away from the pattern ends — resolved exactly under a
+full match, refused under a search, where the `.*p.*` rewrite has nowhere to
+put them. (Lookahead and fixed-width lookbehind are decided exactly under
+both semantics; what a SEARCH refuses here is a `^` or `$` that no zero-width
+prefix or suffix can carry to the pattern edge.)
 
 Treat that as an **upper bound** on comparability rather than a guarantee. Both
 sides of a comparison contribute to the alphabet, so a reference that parses on
@@ -203,8 +205,8 @@ number cannot answer both:
   what we could check, how much was correct" — the model on its own, blind to
   engine coverage.
 
-Re(gEx|DoS)Eval makes the spread concrete: 82.5% of its references parse under
-the search semantics it is scored with, so on the other 17.5% every candidate
+Re(gEx|DoS)Eval makes the spread concrete: 87.9% of its references parse under
+the search semantics it is scored with, so on the other 12.1% every candidate
 that is not textually identical comes back undecidable and scores zero under
 the first reading. Watch both, and treat a gap between them as a statement
 about this engine rather than about whatever you are scoring.
@@ -330,8 +332,9 @@ Two further points confirmed against sources rather than assumed:
 
 - **Lookaround preserves regularity.** Zero-width lookaround assertions do not
   take a pattern outside the regular languages; only combining them with
-  backreferences does, which lands the class at NLOG. So `regexbench` reports
-  lookaround as UNSUPPORTED (decidable, unimplemented) rather than UNDECIDABLE.
+  backreferences does, which lands the class at NLOG. So `regexbench` decides
+  lookaround exactly — lookahead and fixed-width lookbehind — and reports the
+  combination with backreferences as UNDECIDABLE, never as a guessed answer.
 - **Python's shorthand classes are Unicode-aware for text patterns.** `\d`,
   `\w`, `\s`, `\b` and `\B` match Unicode by default and only become
   ASCII-only under `re.ASCII` — see the

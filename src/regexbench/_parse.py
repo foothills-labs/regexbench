@@ -2,18 +2,21 @@
 
 Equivalence checking works by compiling to finite automata, which is only
 possible for patterns that describe regular languages. Anything outside that
-subset — backreferences, lookaround, recursion — is rejected here rather than
-silently mishandled downstream.
+subset — backreferences, recursion — is rejected here rather than silently
+mishandled downstream. Lookaround stays regular and is parsed into
+``Lookaround`` nodes for the automata layer to decide.
 
 Supported: literals, escapes, ``.``, character classes with ranges and
-negation, ``*`` ``+`` ``?`` and ``{m,n}`` repetition, alternation, and
-grouping (capturing or not).
+negation, ``*`` ``+`` ``?`` and ``{m,n}`` repetition, alternation, grouping
+(capturing or not), and the four lookaround assertions.
 
 Anchors are resolved wherever they appear rather than only at the ends: under
 full-match semantics ``^`` holds only if everything before it is empty, so
 ``a^`` is the empty language and ``a?^c`` is ``c``. Under SEARCH semantics an
 anchor away from the ends is still refused, since the ``.*p.*`` rewrite has no
-way to express it.
+way to express it. Anchors inside a lookaround body are different: there they
+describe the position the assertion fires at, so they stay as ``Anchor`` nodes
+and the automata layer treats them as absolute string boundaries.
 
 Where Python's own parser refuses a pattern — ``a**``, ``\\b*``, ``\\q``,
 ``[\\d-z]`` — this refuses it too. A pattern that cannot run under ``re``
@@ -174,15 +177,45 @@ class Repeat(Node):
 class Assert(Node):
     """A zero-width word boundary: `\\b`, or `\\B` when negated.
 
-    Regular despite looking like lookaround — the condition depends only on the
-    two characters either side of the position, so a finite automaton can carry
-    it in its state.
+    Regular even though it looks like lookaround — the condition depends only
+    on the two characters either side of the position, so a finite automaton
+    can carry it in its state.
 
-    The empty string is the one place the two are not exact opposites, and only
-    on some interpreters: see :data:`NEGATED_BOUNDARY_MATCHES_EMPTY`.
+    The empty string is the one place the two are not exact opposites, and
+    only on some interpreters: see :data:`NEGATED_BOUNDARY_MATCHES_EMPTY`.
     """
 
     negated: bool = False
+
+
+@dataclass(frozen=True)
+class Lookaround(Node):
+    """A zero-width lookaround assertion: `(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)`.
+
+    Regular (its body is a regular language, matched against the remaining or
+    the preceding text), so the automata layer decides it rather than the
+    parser refusing it. Only when combined with backreferences does a pattern
+    escape the regular languages.
+
+    ``kind`` is the opening that introduced it, one of ``"="``, ``"!"``,
+    ``"<="``, ``"<!"``. The body is parsed with its anchors kept as
+    :class:`Anchor` nodes: inside a lookaround ``^`` means "the current
+    position is the start of the string" and ``$`` "the end", which is a
+    property of the position the assertion fires at, not of the pattern text.
+    Python fixes the width of lookbehind bodies, so ``kind`` ``"<="`` or
+    ``"<!"`` requires the body to have a fixed width, decided at parse time.
+    """
+
+    kind: str
+    body: Node
+
+    @property
+    def lookahead(self) -> bool:
+        return self.kind in ("=", "!")
+
+    @property
+    def positive(self) -> bool:
+        return self.kind in ("=", "<=")
 
 
 @dataclass(frozen=True)
@@ -271,14 +304,17 @@ def parse(
     if semantics is Semantics.SEARCH:
         # The search reduction widens the pattern with `.*`, which would
         # move any nested anchor away from the position it constrains.
-        # Pattern-edge anchors were already folded into the flags; the
-        # rest are refused rather than mis-answered.
+        # Pattern-edge anchors are folded into the flags; a `^`/`$` that
+        # sits behind only zero-width atoms (`(?=...)`, `\b`, ...) still
+        # marks the pattern edge, so it is folded the same way. Anything
+        # else is refused rather than mis-answered.
+        node, anchored_flags = _fold_edge_anchors(node, parser)
         if _contains_anchor(node):
             raise Unsupported("anchors are only supported at the pattern edges")
     else:
         node, _ = _resolve_anchors(node, prefix_nullable=True, suffix_nullable=True)
     if semantics is Semantics.SEARCH:
-        node = _widen_for_search(node, parser.anchored_start, parser.anchored_end)
+        node = _widen_for_search(node, *anchored_flags)
     return node, frozenset(parser.literals)
 
 
@@ -302,6 +338,71 @@ def uses_assertions(node: Node) -> bool:
 def any_char() -> CharSet:
     """A set matching every character, including the OTHER sentinel."""
     return CharSet(frozenset(), negated=True)
+
+
+def _zero_width(node: Node) -> bool:
+    """Whether `node` can only match the empty string."""
+    if isinstance(node, (Empty, Assert, Anchor)):
+        return True
+    if isinstance(node, Lookaround):
+        return True
+    if isinstance(node, Concat):
+        return all(_zero_width(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return all(_zero_width(option) for option in node.options)
+    if isinstance(node, Repeat):
+        return node.minimum == 0 and node.maximum == 0
+    return False
+
+
+def _fold_edge_anchors(
+    node: Node, parser: _Parser
+) -> tuple[Node, tuple[bool, bool]]:
+    """Fold a `^`/`$` behind only zero-width atoms into the search flags.
+
+    The literal first and last characters of the pattern fold in the
+    parser. The same folding applies when an anchor follows only zero-width
+    atoms: ``(?!^0*$)...^\\d{1,5}`` under search semantics means the pattern
+    must match at the very start of the string, which is exactly what
+    ``anchored_start`` already encodes. ``(?!…)``, ``(?=…)``, ``\\b`` and
+    groups of them all match the empty string, so a `^` behind them is still
+    the pattern edge. Folding only happens when every option reaches the
+    anchor with zero width, so a mid-pattern anchor still refuses rather
+    than mis-answering.
+    """
+    anchored_start = parser.anchored_start
+    anchored_end = parser.anchored_end
+    if isinstance(node, Concat) and node.parts:
+        parts = list(node.parts)
+        # Skip over zero-width atoms — lookarounds, boundaries, empties.
+        # Only an `Anchor` itself gets folded into the search flags; the
+        # assertions stay, since they still constrain the same position.
+        index = 0
+        while index < len(parts):
+            part = parts[index]
+            if isinstance(part, Anchor):
+                if not part.is_start:
+                    break
+                parts.pop(index)
+                anchored_start = True
+                break
+            if not _zero_width(part):
+                break
+            index += 1
+        index = len(parts) - 1
+        while index >= 0:
+            part = parts[index]
+            if isinstance(part, Anchor):
+                if part.is_start:
+                    break
+                parts.pop(index)
+                anchored_end = True
+                break
+            if not _zero_width(part):
+                break
+            index -= 1
+        node = parts[0] if len(parts) == 1 else Concat(tuple(parts))
+    return node, (anchored_start, anchored_end)
 
 
 def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> Node:
@@ -352,10 +453,19 @@ def _nullable(node: Node) -> bool:
         return node.minimum == 0 or _nullable(node.node)
     if isinstance(node, Intersect):
         return all(_nullable(part) for part in node.parts)
+    if isinstance(node, Lookaround):
+        # The assertion consumes nothing, and it holds on the empty string
+        # exactly when its body can match the empty string.
+        return _nullable(node.body)
     return not _nullable(node.node)  # Complement
 
 
 def _contains_anchor(node: Node) -> bool:
+    # Anchors inside lookaround bodies are absolute — `^` means "this is the
+    # start of the string" wherever the assertion fires — so they are the
+    # automaton's business, not the search-rewrite's.
+    if isinstance(node, Lookaround):
+        return False
     if isinstance(node, Anchor):
         return True
     if isinstance(node, Concat):
@@ -365,6 +475,46 @@ def _contains_anchor(node: Node) -> bool:
     if isinstance(node, Repeat):
         return _contains_anchor(node.node)
     return False
+
+
+def _fixed_width(node: Node) -> int | None:
+    """The common length of every string `node` matches, or None.
+
+    Python refuses a lookbehind whose body can match different lengths, so the
+    parser makes the same refusal and says what it is instead of compiling a
+    machine that would silently approximate.
+    """
+    if isinstance(node, (Empty, Assert, Anchor, Lookaround)):
+        return 0
+    if isinstance(node, CharSet):
+        return 1
+    if isinstance(node, Concat):
+        widths = [_fixed_width(part) for part in node.parts]
+        if any(w is None for w in widths):
+            return None
+        return sum(widths)  # type: ignore[return-value]
+    if isinstance(node, Alternate):
+        widths = [_fixed_width(option) for option in node.options]
+        if any(w is None for w in widths):
+            return None
+        if len(set(widths)) != 1:
+            return None
+        return widths[0]
+    if isinstance(node, Repeat):
+        if node.minimum != node.maximum:
+            return None
+        width = _fixed_width(node.node)
+        if width is None:
+            return None
+        return width * node.minimum
+    if isinstance(node, Intersect):
+        widths = [_fixed_width(part) for part in node.parts]
+        if any(w is None for w in widths):
+            return None
+        if len(set(widths)) != 1:
+            return None
+        return widths[0]
+    return None  # Complement: its words are not all one length
 
 
 # Resolving an anchor inside a concatenation enumerates which part carries it,
@@ -396,6 +546,8 @@ def _node_count(node: Node, sizes: dict[int, int]) -> int:
         total = 1 + sum(_node_count(o, sizes) for o in node.options)
     elif isinstance(node, (Repeat, Complement, Atomic, Poss)):
         total = 1 + _node_count(node.node, sizes)
+    elif isinstance(node, Lookaround):
+        total = 1 + _node_count(node.body, sizes)
     else:
         total = 1
     sizes[id(node)] = total
@@ -684,7 +836,8 @@ def _ambiguous(node: Node) -> bool:
     """Whether `node` can match a given position several different ways.
 
     Repetitions pick a count and alternations pick a branch, so both are
-    ambiguous; everything else is determined by the input.
+    ambiguous; everything else is determined by the input. A lookaround is
+    zero-width and either holds or not, so it never adds ambiguity.
     """
     if isinstance(node, (Repeat, Poss, Alternate)):
         return True
@@ -692,6 +845,11 @@ def _ambiguous(node: Node) -> bool:
         return any(_ambiguous(part) for part in node.parts)
     if isinstance(node, (Atomic, Complement)):
         return _ambiguous(node.node)
+    if isinstance(node, Lookaround):
+        # The assertion is zero-width and either holds or not: the body's own
+        # ambiguity only concerns the body's match, which decides the
+        # assertion deterministically. So the group never adds ambiguity.
+        return False
     return False
 
 
@@ -712,6 +870,8 @@ def _sticky_problem(node: Node) -> bool:
         return any(_sticky_problem(part) for part in node.parts)
     if isinstance(node, (Repeat, Complement)):
         return _sticky_problem(node.node)
+    if isinstance(node, Lookaround):
+        return _sticky_problem(node.body)
     return False
 
 
@@ -761,6 +921,11 @@ def _finalize_sticky(node: Node, at_end: bool) -> Node:
         )
     if isinstance(node, Complement):
         return Complement(_finalize_sticky(node.node, at_end))
+    if isinstance(node, Lookaround):
+        # The body is matched against a window with nothing following it
+        # inside the assertion, so a trailing possessive quantifier in the
+        # body is as transparent as at the end of a branch.
+        return Lookaround(node.kind, _finalize_sticky(node.body, at_end=True))
     return node
 
 
@@ -945,10 +1110,29 @@ class _Parser:
             if rest.startswith("?:"):
                 self.pos += 2
             elif rest.startswith(("?=", "?!", "?<=", "?<!")):
-                # Not NonRegular: lookaround alone preserves regularity, so
-                # this is decidable and merely unimplemented. Only combining it
-                # with backreferences escapes the regular languages.
-                raise Unsupported("lookaround is not supported")
+                # Lookaround keeps the language regular, so this parses into a
+                # `Lookaround` node for the automata layer to decide. Anchors
+                # inside the body are absolute — `^` means "the current
+                # position is the start of the string", `$` the end — so they
+                # stay as `Anchor` nodes rather than being resolved here.
+                opened = ""
+                for opener, kind in (
+                    ("?<=", "<="),
+                    ("?<!", "<!"),
+                    ("?=", "="),
+                    ("?!", "!"),
+                ):
+                    if rest.startswith(opener):
+                        self.pos += len(opener)
+                        opened = kind
+                        break
+                body = self.parse_alternation()
+                if self.peek() != ")":
+                    raise Unsupported("unbalanced parenthesis")
+                self.eat()
+                if opened in ("<=", "<!") and _fixed_width(body) is None:
+                    raise Unsupported("look-behind requires fixed-width pattern")
+                return Lookaround(kind=opened, body=body)
             elif rest.startswith("?>"):
                 # Atomicity changes the language only when the content can
                 # match several ways and later text could backtrack into it;
