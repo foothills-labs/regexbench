@@ -89,6 +89,7 @@ WALKERS: dict[str, object] = {
     "_contains_anchor": lambda n: _parse._contains_anchor(n),
     "_contains_lookaround": lambda n: _parse._contains_lookaround(n),
     "_nested_fires_at_start": lambda n: _parse._nested_fires_at_start(n),
+    "_nested_always_fires": lambda n: _parse._nested_always_fires(n),
     "_right_run_has_assert": lambda n: _parse._right_run_has_assert(n),
     "_left_run_has_lookaround": lambda n: _parse._left_run_has_lookaround(n),
     "_assert_meets_lookaround": lambda n: _parse._assert_meets_lookaround(n),

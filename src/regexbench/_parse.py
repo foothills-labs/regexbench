@@ -623,6 +623,37 @@ def _nested_fires_at_start(node: Node) -> bool:
     _unhandled(node, "_nested_fires_at_start")
 
 
+def _nested_always_fires(node: Node) -> bool:
+    """Whether every lookaround in `node` fires on every path through it.
+
+    A nested assertion's marker rides the outer's edge, so the chain certifies
+    it whenever the outer fires — unconditionally. That is only the body's own
+    condition when the body cannot skip it. `(?=(?![0-9])?a)` can: `re` is free
+    to take the branch where the inner assertion never runs, and the chain
+    enforced it anyway. An alternation is the same problem from the other side,
+    since the chain fires every branch's markers no matter which branch the
+    body takes.
+    """
+    if isinstance(node, Lookaround):
+        # Its own body was checked when it was parsed; bodies nest inwards.
+        return True
+    if isinstance(node, Concat):
+        return all(_nested_always_fires(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return not any(_contains_lookaround(option) for option in node.options)
+    if isinstance(node, Repeat):
+        if node.minimum == 0 and _contains_lookaround(node.node):
+            return False
+        return _nested_always_fires(node.node)
+    if isinstance(node, (Poss, Atomic)):
+        return _nested_always_fires(node.node)
+    if isinstance(node, (Intersect, Complement)):
+        return not _contains_lookaround(node)
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return True
+    _unhandled(node, "_nested_always_fires")
+
+
 def _zero_width(node: Node) -> bool:
     """Whether `node` can only match the empty string."""
     if isinstance(node, (Empty, Assert, Anchor)):
@@ -1545,6 +1576,30 @@ class _Parser:
                     raise Unsupported(
                         "a lookaround nested past the start of another's body "
                         "is not supported"
+                    )
+                if opened != "=" and _contains_lookaround(body):
+                    # A nested assertion is checked by chaining its marker
+                    # onto this one's, which certifies it against the real
+                    # subject at *this* position. That is exactly the body's
+                    # own condition only under a positive lookahead, whose
+                    # body begins where the assertion fires.
+                    #
+                    # Under a negative one it is De Morgan run backwards:
+                    # `(?!(?=a)b)` fails when the conjunction fails, and the
+                    # chain asks instead that neither conjunct hold, so
+                    # `(?!(?!a))a` matched nothing where `re` matches "a".
+                    # Under a lookbehind the position is wrong as well — the
+                    # body ends at the firing position and starts a body's
+                    # width earlier — so `(?<=(?<=a)b)` was certified against
+                    # the text after the match and rejected "ab".
+                    raise Unsupported(
+                        "a lookaround nested inside a negative lookaround or "
+                        "a lookbehind is not supported"
+                    )
+                if not _nested_always_fires(body):
+                    raise Unsupported(
+                        "a lookaround nested in a body that can skip it is "
+                        "not supported"
                     )
                 return Lookaround(kind=opened, body=body)
             elif rest.startswith("?>"):

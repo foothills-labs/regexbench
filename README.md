@@ -321,7 +321,7 @@ Known limits, in the order they cost you coverage:
 | Construct | Status |
 | --- | --- |
 | `^` / `$` away from the pattern ends, under `SEARCH` | `UNSUPPORTED` — the `.*p.*` rewrite has nowhere to put them. 9.8% of Re(gEx|DoS)Eval; resolved exactly under `FULLMATCH` |
-| Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata. Refused for a variable-width lookbehind, one nested past the start of another's body, a `\b` immediately in front of one, or one inside a dk.brics `&`/`~` operand |
+| Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata. Refused for a variable-width lookbehind, a `\b` immediately in front of one, or one inside a dk.brics `&`/`~` operand. Nesting is decided only inside a positive lookahead, and only at the body's start |
 | `$` before text that could be the subject's final newline, under `FULLMATCH` | `UNSUPPORTED` — Python's `$` matches there too, and folding the anchor cannot say so. 1.2% of Re(gEx|DoS)Eval; exact under `SEARCH` |
 | Backreferences | `UNDECIDABLE` — no engine can answer this |
 | `[\D0-9]` — a negated shorthand mixed with other members | `UNSUPPORTED` — not one character set |
