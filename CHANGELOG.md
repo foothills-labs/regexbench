@@ -9,6 +9,42 @@ that a 0.x line makes no stability promise.
 
 ### Added
 
+- **Walkers name every node type, and a test proves it.** Every recursive
+  function over the AST used to end in a bare `return False`, so a node type
+  a walker had never been taught about took the default silently. That is how
+  `(?!a?)a` came back equivalent to `a` — `_epsilon_restrict` met a
+  `Lookaround`, fell through to the complement branch, and deleted the
+  assertion — and it is the same shape as every other wrong-answer family this
+  engine has shipped.
+
+  The 17 walkers now enumerate their leaves explicitly and end in
+  `_unhandled()`, so "nothing to do here" reads differently from "nobody
+  thought about it". `tests/test_walkers.py` puts all 12 node types through all
+  17 walkers directly, rather than hoping some pattern reaches the branch;
+  removing `Lookaround` from `_epsilon_restrict` fails it on exactly that
+  pair. A new `Node` subclass fails the inventory test until it is added, and a
+  new walker fails a meta-test until it is registered.
+
+  Python's own `ast.NodeVisitor` defaults to a silent `generic_visit`, and
+  `typing.assert_never` only bites under a type checker this project does not
+  run — so the guarantee is a runtime raise plus a structural test, which
+  needs neither a dependency nor a checker.
+
+- **The differential generator draws its atoms from a declared syntax
+  surface.** `_syntax.SYNTAX` lists all 56 constructs the engine claims to
+  support, each with a fragment that exercises it, and the generator's alphabet
+  is that list. Two tests keep it honest: one asserts every declared construct
+  is actually emitted — grammar coverage, the adequacy criterion the
+  grammar-fuzzing literature uses — and one asserts every escape letter, group
+  opener and node type the parser accepts is declared, so support cannot be
+  added without being generated.
+
+  Hand-maintained atom lists are why escapes went a release and lookaround a
+  whole branch with a generator structurally unable to emit them; both were
+  only fixed after the wrong verdicts had shipped. Adding `\Q` to
+  `_PATTERN_ESCAPE_LETTERS` now fails a test until it is declared, and
+  declaring it feeds the generator with no further work.
+
 - **Lookaround is decided, not refused.** `(?=…)`, `(?!…)`, fixed-width
   `(?<=…)` and `(?<!…)` now build into the automata instead of coming back
   `UNSUPPORTED`. The pattern is compiled with each assertion reduced to an
@@ -69,6 +105,15 @@ now covers them fails on all twelve of its seeds without these.
 - **Folding both edge anchors away crashed.** `(^)($)` under SEARCH emptied
   the parts list, built a `Concat(())`, and raised `IndexError` out of the
   automata layer instead of returning a verdict.
+
+### Fixed
+
+- **Possessive quantifiers and atomic groups are refused where `re` refuses
+  them.** Both arrived in CPython 3.11, so on 3.10 the engine was answering
+  `(a*+)` and `(?>a)` — patterns the interpreter running `check()` and
+  `screen()` cannot compile at all. Probed rather than version-tested, like
+  the `\B` rule. Found by the syntax-surface test above on its first run
+  against 3.10, which is the sort of thing it exists for.
 
 ### Changed
 

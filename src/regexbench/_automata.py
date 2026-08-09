@@ -38,6 +38,7 @@ from ._parse import (
     Poss,
     Repeat,
     Unsupported,
+    _unhandled,
     in_class,
     is_word_symbol,
     uses_assertions,
@@ -448,6 +449,10 @@ def _collect_lookarounds(node: Node, out: list[Lookaround]) -> None:
                 walk(part)
         elif isinstance(node, (Repeat, Complement, Poss, Atomic)):
             walk(node.node)
+        elif isinstance(node, (Empty, CharSet, Assert, Anchor)):
+            pass  # nothing below these can carry an assertion
+        else:
+            _unhandled(node, "_collect_lookarounds")
 
     walk(node)
 
@@ -625,9 +630,11 @@ def _context_sensitive(node: Node) -> bool:
         return any(_context_sensitive(p) for p in node.parts)
     if isinstance(node, Alternate):
         return any(_context_sensitive(o) for o in node.options)
-    if isinstance(node, (Repeat, Complement)):
+    if isinstance(node, (Repeat, Complement, Poss, Atomic)):
         return _context_sensitive(node.node)
-    return False
+    if isinstance(node, (Empty, CharSet)):
+        return False
+    _unhandled(node, "_context_sensitive")
 
 
 def _lookahead_constraint(

@@ -3,6 +3,18 @@ import re
 import pytest
 
 from regexbench import Dialect, Semantics, Verdict, equivalent, is_regular
+from regexbench._parse import ATOMIC_GROUP_SUPPORTED, POSSESSIVE_SUPPORTED
+
+# Both arrived in CPython 3.11, and the parser refuses what the running `re`
+# cannot compile — so on 3.10 these are `UNSUPPORTED` rather than decided, and
+# asserting the decided answer there would be asserting against the
+# interpreter the verdicts are measured on.
+needs_possessive = pytest.mark.skipif(
+    not POSSESSIVE_SUPPORTED, reason="possessive quantifiers need CPython 3.11+"
+)
+needs_atomic = pytest.mark.skipif(
+    not ATOMIC_GROUP_SUPPORTED, reason="atomic groups need CPython 3.11+"
+)
 
 
 @pytest.mark.parametrize(
@@ -603,6 +615,7 @@ def test_group_wrapped_repeats_may_be_requantified():
         (r"a?+", r"a?"),
     ],
 )
+@needs_possessive
 def test_possessive_quantifier_at_branch_end(left, right):
     """A possessive quantifier seals the repetition count, which only matters
     when later text could backtrack into it; at the end of a branch it matches
@@ -615,6 +628,7 @@ def test_possessive_quantifier_at_branch_end(left, right):
     "pattern",
     [r"a{2,3}+b", r"(a{2,3}+)*", r"a*+b", r"(a{2,3}+|b)c", r"(a|ab){2}+", r"(a|b){2,3}+"],
 )
+@needs_possessive
 def test_possessive_quantifier_mid_pattern_is_refused(pattern):
     """Mid-pattern, `a{2,3}+b` genuinely differs from `a{2,3}b` — the sealed
     count cannot be given back — and over an ambiguous atom even a final
@@ -633,6 +647,7 @@ def test_possessive_quantifier_mid_pattern_is_refused(pattern):
         (r"(?>(ab))+", r"(ab)+"),
     ],
 )
+@needs_atomic
 def test_atomic_groups_with_unique_matches(left, right):
     """An atomic group only changes the language when its content could match
     several ways; content that matches exactly one way is transparent."""
@@ -644,6 +659,7 @@ def test_atomic_groups_with_unique_matches(left, right):
     "pattern",
     [r"(?>a|ab)b", r"(?>a+)b", r"(?>a|b)*", r"(?>a|ab)", r"(?>a+)", r"(?>a|b)"],
 )
+@needs_atomic
 def test_atomic_groups_with_ambiguous_content_are_refused(pattern):
     """`(?>a|ab)` seals the alternation's greedy choice, so it fullmatches
     only "a" — not `a|ab`; `(?>a|ab)b` differs from `(a|ab)b` on "aab". Both
