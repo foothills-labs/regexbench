@@ -298,6 +298,35 @@ So change it once, deliberately, and keep it fixed across runs you intend to
 compare — a timeout is part of a score's definition, not a tuning knob to reach
 for after seeing the number.
 
+## Validation corpora
+
+The corpora above are what a score is *reported* on. They are not enough to
+trust the engine, because a corpus of 762 curated references exercises the
+constructs a curator chose. Three larger corpora of regexes written by people
+who were not thinking about this tool are used to check the engine instead,
+all from the [LinguaFranca FSE'19 artifact](https://github.com/VTLeeLab/LinguaFranca-FSE19).
+
+Each pattern is parsed, compiled to a DFA over a small alphabet drawn from its
+own literals plus one character it never names, and every string up to three
+characters over that alphabet is compared against `re.fullmatch`. A refusal is
+not a failure — it is a stated answer. A disagreement is.
+
+| Corpus | Unique patterns | `re` compiles | Analyzable | Cross-checked | String comparisons | Disagreements |
+| --- | --- | --- | --- | --- | --- | --- |
+| Production (PyPI) | 43,895 | 43,761 | 41,927 (95.8%) | 41,741 | 5,865,274 | 0 |
+| Stack Overflow | 495,135 | 438,563 | 410,151 (93.5%) | 32,977 | 4,704,734 | 0 |
+| RegExLib | 3,838 | 3,446 | 3,198 (92.8%) | 2,983 | 453,233 | 0 |
+
+No crashes, and one pattern out of 485,770 took longer than five seconds to
+parse. The Stack Overflow row cross-checks a 40,000-pattern sample of its
+438,563, not all of them; the analyzable column is the full sweep.
+
+These runs are how the four wrong-answer bugs listed under *Fixed* in the
+changelog were found — an identity-keyed memo that could read another node's
+answer, `$` folded as plain end-of-string, an anchor dropped from a region a
+`$` collapsed, and chained assertion markers firing as alternatives. None of
+them was reachable by the test suite at the time, and each is now.
+
 ## References
 
 The claims in this document were checked against these sources rather than

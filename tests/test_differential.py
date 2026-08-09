@@ -505,8 +505,15 @@ LOOKAROUND_ATOMS = [
     # must survive a region being forced to the empty string.
     "(?!a?)", "(?=a?)", "(?!)",
     # Nested at the body start, which fires at the same position and is
-    # decided; nesting past the start is refused, not answered.
+    # decided; nesting past the start is refused, not answered. The body must
+    # also carry consuming text — `(?=(?!b)a)` matched the empty string while
+    # the chained markers were alternatives, and a body of nothing but the
+    # nested assertion cannot show that.
     "(?=(?=a))", "(?=(?!b))",
+    "(?=(?!b)a)", "(?=(?=a)a)", "(?<=(?<!a)b)", "(?<=(?<=a)b)",
+    # Refused rather than answered, so these only ever skip — but a change
+    # that starts deciding them lands in the membership check below.
+    "(?!(?=a))", "(?!(?!a))", "(?<!(?<=a)b)",
 ]
 LOOKAROUNDS = generator(LOOKAROUND_ATOMS)
 LOOKAROUND_CORPUS = corpus("ab", longest=4)
@@ -614,10 +621,15 @@ def test_the_generator_reaches_every_construct_it_claims() -> None:
     assert not missing, f"declared but never generated: {missing}"
 
 
+@pytest.mark.parametrize(
+    "build,texts",
+    [(SURFACE, SURFACE_CORPUS), (LOOKAROUNDS, LOOKAROUND_CORPUS)],
+    ids=["surface", "lookaround"],
+)
 @pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
 @pytest.mark.parametrize("seed", range(8))
 def test_every_generated_pattern_accepts_what_re_accepts(
-    seed: int, semantics: Semantics
+    seed: int, semantics: Semantics, build, texts
 ) -> None:
     """One pattern's automaton against `re`, string by string.
 
@@ -637,7 +649,7 @@ def test_every_generated_pattern_accepts_what_re_accepts(
     checked = 0
 
     for _ in range(150):
-        pattern = SURFACE(rng)
+        pattern = build(rng)
         try:
             compiled = re.compile(pattern)
         except re.error:
@@ -650,7 +662,7 @@ def test_every_generated_pattern_accepts_what_re_accepts(
 
         checked += 1
         ground_truth = matcher(compiled, accepts)
-        for text in SURFACE_CORPUS:
+        for text in texts:
             assert dfa.accepts(text) == ground_truth(text), (
                 f"{pattern!r} under {semantics.name}: automaton "
                 f"{'accepts' if dfa.accepts(text) else 'rejects'} {text!r}, "

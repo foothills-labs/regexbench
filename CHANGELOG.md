@@ -64,13 +64,23 @@ that a 0.x line makes no stability promise.
   lookaround still leaves the regular languages, and now stays `UNDECIDABLE`
   for that reason rather than being confused with what this engine can answer.
 
-  Four shapes are refused rather than answered, because the marker
+  Nesting is decided only inside a positive lookahead. That is the one case
+  where a nested assertion fires where the outer one does — so its marker can
+  ride the outer's edge — and where the outer's condition is a conjunction
+  the chain can take apart. Nested inside a lookbehind the position is wrong,
+  because the body ends at the firing position and begins a body's width
+  earlier; nested inside a negative assertion the chain is De Morgan run
+  backwards, asking that neither conjunct hold rather than that the
+  conjunction fail.
+
+  Five shapes are refused rather than answered, because the marker
   construction cannot represent them: a lookaround nested past the start of
-  another's body, a `\b`/`\B` immediately in front of one (a marker fires
-  before any character is consumed, and a boundary is only crossed while
-  consuming one), a lookaround inside a dk.brics `&`/`~` operand (the context
-  gate cannot carry the preceding text a lookbehind needs), and a
-  variable-width lookbehind, which Python refuses too.
+  another's body, one nested inside a lookbehind or a negative assertion, a
+  `\b`/`\B` immediately in front of one (a marker fires before any character
+  is consumed, and a boundary is only crossed while consuming one), a
+  lookaround inside a dk.brics `&`/`~` operand (the context gate cannot carry
+  the preceding text a lookbehind needs), and a variable-width lookbehind,
+  which Python refuses too.
 
 - **An anchored `^`/`$` behind zero-width atoms folds under SEARCH.** The
   anchor folding that handled the literal first and last characters of a
@@ -108,10 +118,11 @@ now covers them fails on all twelve of its seeds without these.
 
 ### Fixed
 
-Found by running two real-world corpora through the engine: 43,895 patterns
-used by PyPI packages, from the LinguaFranca polyglot corpus, cross-checked
-against `re` string by string. Three wrong-answer bugs, none of which the
-suite could reach at the time.
+Found by running three real-world corpora through the engine — 43,895 regexes
+used by PyPI packages, 495,135 from Stack Overflow posts and 3,838 from
+RegExLib, all from the LinguaFranca artifact — with every pattern's automaton
+cross-checked against `re` string by string. Four wrong-answer bugs, none of
+which the suite could reach at the time.
 
 - **An identity-keyed memo could read another node's answer.** Anchor
   resolution memoises on `id(node)` but kept no reference to the node, and
@@ -141,6 +152,25 @@ suite could reach at the time.
   move from decided to refused under FULLMATCH as a result; the SEARCH count
   the corpus is scored on is unchanged.
 
+- **Chained assertion markers fired as alternatives, not in series.** A
+  lookaround nested at the start of another's body has its marker chained onto
+  the outer's edge, and each was linked from the same state to the same state
+  — which makes them alternatives. A run fires exactly one, every other
+  constraint machine sees no firing, and a machine with no firing to check
+  reads as vacuously satisfied. `(?=(?!b)a)` therefore matched the empty
+  string: the run fired the inner marker and nothing ever asked whether an
+  "a" followed. They now chain in series, so every assertion on the edge is
+  certified.
+
+  Two nestings the chain cannot represent at all are refused with it. Inside a
+  lookbehind the firing position is wrong — the body ends where the assertion
+  fires and begins a body's width earlier — so `(?<=(?<=a)b)` was certified
+  against the text after the match and rejected "ab". Inside a negative
+  assertion the chain is De Morgan run backwards, asking that neither conjunct
+  hold rather than that the conjunction fail, so `(?!(?!a))a` matched nothing
+  where `re` matches "a". Nesting stays decided inside a positive lookahead,
+  which is where it is sound.
+
 - **An anchor nested inside a region a `$` collapsed was dropped.** `a$`
   forces everything after it to be the empty string, and the resolver
   collapsed that tail — but empty text still has a position, and the `^` in
@@ -159,7 +189,9 @@ suite could reach at the time.
   `$` bug above produced one failure in 21,000 generated pairs. A new test
   runs each generated pattern's automaton against `re` string by string,
   which is the check the real-world corpora get, and it fails on the first
-  seed without the fix.
+  seed without the fix. Run over the lookaround generator it also catches the
+  marker-chaining bug above, which the pairwise version had run past for the
+  length of a branch.
 
   Two supporting gaps closed with it. The generator attached quantifiers to
   every atom outside a hardcoded `\b`/`\B` list, so every draw of `^` or `$`

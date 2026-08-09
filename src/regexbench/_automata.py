@@ -187,16 +187,27 @@ class _NFA:
             # markers chain along here too — the inner one is invisible to the
             # marked machine otherwise, and its constraint would have nothing
             # to certify.
+            #
+            # They chain in series, not in parallel. Linking each marker
+            # `start -> accept` on its own makes them alternatives, so a run
+            # fires exactly one and every other constraint sees no firing at
+            # all — which those machines read as vacuously satisfied. That is
+            # how `(?=(?!b)a)` came back matching the empty string: the run
+            # fired the inner marker, the outer's constraint never asked
+            # whether an "a" followed, and nothing checked it.
             chain = [id(node)]
             nested: list[Lookaround] = []
             _collect_lookarounds(node.body, nested)
             chain.extend(id(body) for body in nested)
-            for node_id in chain:
+            current = start
+            for position, node_id in enumerate(chain):
                 symbol = self.marker_for.get(node_id)
                 if symbol is None:  # pragma: no cover - build_dfa assigns these up front
                     symbol = f"\x01mk{node_id}"
                     self.marker_for[node_id] = symbol
-                self.link(start, accept, _Marker(symbol))
+                target = accept if position == len(chain) - 1 else self.new_state()
+                self.link(current, target, _Marker(symbol))
+                current = target
 
         elif isinstance(node, Repeat):
             self._emit_repeat(node, start, accept)

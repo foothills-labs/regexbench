@@ -11,6 +11,8 @@ import re
 import pytest
 
 from regexbench import Semantics, Task, Verdict, check, equivalent, is_regular
+from regexbench._automata import build_dfa
+from regexbench._parse import parse
 
 # Every pair here was verified against `re.fullmatch` over small alphabets:
 # the two patterns describe exactly the same language.
@@ -240,6 +242,83 @@ def test_a_lookaround_nested_at_the_body_start_is_still_decided():
     """It fires where the outer one does, so chaining the markers is right."""
     assert equivalent(r"(?=(?=^a))a", r"a").verdict is Verdict.EQUIVALENT
     assert equivalent(r"(?=(?!b))a", r"a").verdict is Verdict.EQUIVALENT
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"(?=(?!b)a)",
+        r"(?=(?!b)a)a",
+        r"(?=(?=a)a)a",
+        r"(?=(?![0-9])a)",
+        r"(?=(?=aa)a)aa",
+        r"(?=(?=a)(?=aa))aa",
+        r"(?=(?<=a)b)",
+        r"a(?=(?<=a)b)b",
+    ],
+)
+def test_chained_markers_fire_in_series_not_as_alternatives(pattern):
+    r"""Every assertion on a chained edge has to be certified, not one of them.
+
+    Each marker in the chain was linked `start -> accept` on its own, which
+    makes them *alternatives*: a run fires exactly one, and every other
+    constraint machine sees no firing at all — which it reads as vacuously
+    satisfied. `(?=(?!b)a)` therefore matched the empty string, because the
+    run fired the inner marker and nothing ever asked whether an "a" followed.
+
+    Found on 495,135 Stack Overflow patterns; the pairwise differential could
+    not see it, because both patterns in a pair go wrong the same way.
+    """
+    alphabet = ("a", "b", "0")
+    texts = [""] + [
+        "".join(combo)
+        for length in (1, 2, 3)
+        for combo in itertools.product(alphabet, repeat=length)
+    ]
+    node, _ = parse(pattern, semantics=Semantics.FULLMATCH)
+    dfa = build_dfa(node, alphabet)
+    assert [t for t in texts if dfa.accepts(t)] == [
+        t for t in texts if re.fullmatch(pattern, t)
+    ]
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        # De Morgan: `(?!X Y)` fails when the *conjunction* fails, but chaining
+        # the markers asks that neither conjunct hold. `(?!(?!a))a` matches
+        # "a" under `re` and matched nothing here.
+        r"(?!(?!a))",
+        r"(?!(?!a))a",
+        r"(?!(?=a))",
+        r"(?<!(?<!a)b)c",
+        # A lookbehind's body ends where the assertion fires and begins a
+        # body's width earlier, so a nested marker on the outer's edge is
+        # certified at the wrong position: `(?<=(?<=a)b)` rejected "ab".
+        r"(?<=(?<=a)b)",
+        r"(?<=(?<!a)b)",
+        r"ab(?<=(?<=a)b)",
+        r"(?<=(?!a)b)c",
+        # The chain certifies a nested assertion whenever the outer fires, so
+        # one the body can skip is one it over-enforces: `re` may take the
+        # branch where `(?![0-9])?` never runs.
+        r"(?=(?![0-9])?a)",
+        r"(?=(?=a)*b)",
+        r"(?=(?=a)|(?=b))",
+        r"(?=(?=a)?b)",
+    ],
+)
+def test_nesting_the_chain_cannot_represent_is_refused(pattern):
+    """Chaining is sound only inside a positive lookahead.
+
+    That is the one case where the nested assertion fires where the outer one
+    does *and* the outer's condition is a conjunction the chain can take
+    apart. Everything else is refused rather than certified at the wrong
+    position or with the negation on the wrong side.
+    """
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+    assert "nested" in result.reason
 
 
 @pytest.mark.parametrize("pattern", [r"(?=a(?=b))ab", r"(?<=a(?=b))b"])
