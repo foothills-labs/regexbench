@@ -522,7 +522,14 @@ def _fold_edge_anchors(
             if isinstance(part, Anchor):
                 if not part.is_start:
                     break
-                parts.pop(index)
+                # Replaced, not removed. Dropping it can leave a bare
+                # `Alternate`, and `_widen_for_search` distributes its
+                # wildcards over an alternation's branches — right for
+                # `^a|b$`, where each anchor binds to one branch, wrong for
+                # `(?:^(a|b)$)`, where both bind to the whole group. The
+                # parser's own folding leaves an `Empty()` here for the same
+                # reason.
+                parts[index] = Empty()
                 anchored_start = True
                 break
             if not _zero_width(part):
@@ -534,7 +541,7 @@ def _fold_edge_anchors(
             if isinstance(part, Anchor):
                 if part.is_start:
                     break
-                parts.pop(index)
+                parts[index] = Empty()
                 anchored_end = True
                 break
             if not _zero_width(part):

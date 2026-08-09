@@ -74,10 +74,14 @@ now covers them fails on all twelve of its seeds without these.
 
 - **Benchmark coverage grows.** 669/762 = 87.8% of Re(gEx|DoS)Eval's SEARCH
   references parse now, up from 629/762 = 82.5% (FULLMATCH 740/762 = 97.1%).
-  The remaining lookaround refs are refused either because they combine the
-  assertion with a backreference, or because a non-edge anchor makes the
-  SEARCH reduction impossible. `equivalence()` reports the new verdicts in
-  its docstring.
+  Three of the newly parseable references carry a ReDoS shape the structural
+  pass can now see, so `vulnerable@1` on that corpus moves from 12.7% to
+  13.1% — a property of the dataset that was previously invisible, not a
+  change in what counts as vulnerable.
+  The remaining lookaround refs are refused because they combine the assertion
+  with a backreference, because a non-edge anchor makes the SEARCH reduction
+  impossible, or for one of the four shapes listed above. `equivalent()`
+  reports the new verdicts in its docstring.
 
 ## 0.3.0 — 2026-08-03
 

@@ -682,3 +682,26 @@ def test_anchor_resolution_does_not_explode_on_deep_nesting():
     result = equivalent(pattern, "x")
     assert time.monotonic() - started < 10, "anchor resolution blew up again"
     assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"^(a|b)$", r"^((0[1-9])|(1[0-2]))$", r"^(ab|cd)$", r"^a$"],
+)
+def test_a_grouped_alternation_keeps_its_anchors_whole_under_search(pattern):
+    """`(?:^(a|b)$)` is `^(a|b)$`, and both anchor the whole alternation.
+
+    `_widen_for_search` distributes its wildcards over an alternation's
+    branches, which is right for `^a|b$` — there the `^` binds to the first
+    branch only — and wrong here. The parser folds an edge anchor to `Empty()`
+    and leaves a `Concat`, so the distribution never fires; `_fold_edge_anchors`
+    removed the anchor instead, collapsing to a bare `Alternate`, and
+    `(?:^(a|b)$)` came back matching "aa".
+    """
+    wrapped = f"(?:{pattern})"
+    result = equivalent(pattern, wrapped, semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
+    for text in ["", "a", "b", "aa", "ab", "01", "010", "12"]:
+        assert (re.search(pattern, text) is not None) == (
+            re.search(wrapped, text) is not None
+        )

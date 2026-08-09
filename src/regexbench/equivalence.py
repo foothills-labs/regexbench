@@ -52,7 +52,7 @@ def equivalent(
     backreferences, which put it outside the regular languages. Lookaround
     stays inside them and is decided exactly: lookahead and fixed-width
     lookbehind build into the automata. What it cannot answer comes back
-    UNSUPPORTED with a reason."
+    UNSUPPORTED with a reason.
 
     Under SEARCH semantics the question becomes "do these two patterns accept
     the same *subject strings* when searched", which is the right question for
