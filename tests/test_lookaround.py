@@ -22,7 +22,7 @@ EQUIVALENT_PAIRS = [
     (r"a(?<=a)b", r"ab"),
     (r"a(?<!x)b", r"ab"),
     (r"(?!b)*a", r"a"),
-    (r"(?:(?!b).)*", r"[^b]*"),
+    (r"(?:(?!b).)*", r"[^b\n]*"),
     (r"(?=.*\d).*", r".*\d.*"),
     (r"abc(?<!x)", r"abc"),
     (r"(?=b)..", r"b."),
@@ -86,8 +86,9 @@ def test_negative_lookahead_binds_every_iteration_position():
 
 
 def test_tempered_dot_forbids_the_marker_everywhere():
-    # `(?:(?!b).)*` rejects any string containing `b`; `[^b]*` is the same set.
-    result = equivalent(r"(?:(?!b).)*", r"[^b]*")
+    # `(?:(?!b).)*` rejects any string containing `b` — and any containing a
+    # newline, since `.` does not match one; `[^b\n]*` is the same set.
+    result = equivalent(r"(?:(?!b).)*", r"[^b\n]*")
     assert result.verdict is Verdict.EQUIVALENT, result.reason
     assert re.fullmatch(r"(?:(?!b).)*", "aba") is None
     assert re.fullmatch(r"(?:(?!b).)*", "aaa") is not None

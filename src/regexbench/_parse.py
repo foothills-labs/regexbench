@@ -360,6 +360,12 @@ def parse(
         node, anchored_flags = _fold_edge_anchors(node, parser)
         if _contains_anchor(node):
             raise Unsupported("anchors are only supported at the pattern edges")
+        if anchored_flags[1]:
+            # A folded `$` still allows one trailing newline — Python's `$`
+            # matches just before a newline that ends the subject, and the
+            # search reduction's `[\n]?` needs the newline to exist in the
+            # alphabet or there is no symbol for it to consume.
+            parser.literals.add("\n")
     else:
         if _end_anchor_meets_newline(node, False):
             raise Unsupported(
@@ -409,7 +415,7 @@ def _right_run_has_assert(node: Node) -> bool:
         for part in reversed(node.parts):
             if _right_run_has_assert(part):
                 return True
-            if not _zero_width(part):
+            if not _nullable(part):
                 return False
         return False
     if isinstance(node, Alternate):
@@ -431,7 +437,7 @@ def _left_run_has_lookaround(node: Node) -> bool:
         for part in node.parts:
             if _left_run_has_lookaround(part):
                 return True
-            if not _zero_width(part):
+            if not _nullable(part):
                 return False
         return False
     if isinstance(node, Alternate):
@@ -446,7 +452,13 @@ def _left_run_has_lookaround(node: Node) -> bool:
 
 
 def _assert_meets_lookaround(node: Node) -> bool:
-    """Whether a `\b` can sit immediately in front of a lookaround marker."""
+    """Whether a `\b` can sit immediately in front of a lookaround marker.
+
+    A nullable atom between them does not help: when it matches the empty
+    string the marker fires at the boundary's own position, so `\b(x?)(?=b)b`
+    is just as unrepresentable as `\b(?=b)b`. Only an atom that *cannot* be
+    empty pushes the marker past a character, letting the boundary resolve.
+    """
     if isinstance(node, Concat):
         parts = node.parts
         for i, part in enumerate(parts):
@@ -455,7 +467,7 @@ def _assert_meets_lookaround(node: Node) -> bool:
             for later in parts[i + 1 :]:
                 if _left_run_has_lookaround(later):
                     return True
-                if not _zero_width(later):
+                if not _nullable(later):
                     break
         return any(_assert_meets_lookaround(p) for p in parts)
     if isinstance(node, Alternate):
@@ -1511,6 +1523,16 @@ class _Parser:
         if ch == "[":
             return self._char_class()
         if ch == ".":
+            if self.brics:
+                # dk.brics' dot matches every character, the newline included:
+                # its patterns are over plain strings, with no line concept.
+                return any_char()
+            # `.` matches every character except the newline — the one
+            # Unicode distinction it draws without naming a character. The
+            # newline has to join the alphabet or it is conflated with the
+            # rest of the whitespace sentinel, and `a.` comes back equivalent
+            # to `ab|a[^b]` although the two differ on "a\n".
+            self.literals.add("\n")
             return CharSet(frozenset("\n"), negated=True)
         if ch == "\\":
             return self._escape()
