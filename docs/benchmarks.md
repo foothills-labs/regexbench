@@ -46,7 +46,7 @@ Scoring the corpus against itself — `--use-reference` — gives:
 | --- | --- | --- |
 | `pass@1` | 99.9–100% | the references pass their own tests, so the corpus is loaded correctly |
 | `dfa-eq@1` | 100% | reflexivity — identical patterns, no automaton consulted |
-| `vulnerable@1` | 12.7% | 97 of the corpus's own reference expressions are ReDoS-vulnerable |
+| `vulnerable@1` | 13.1% | 100 of the corpus's own reference expressions are ReDoS-vulnerable |
 
 `dfa-eq@1` of 100% here is not a coverage measurement. Identical text denotes
 identical languages, so `equivalent()` short-circuits before parsing — which is
@@ -74,9 +74,12 @@ print(f"{analyzable}/{len(tasks)}")     # 669/762 = 87.8%
 **Pass the corpus's own `semantics`.** It changes the answer, and the default
 flatters this corpus: 740 of the 762 references parse under FULLMATCH (97.1%)
 but 669 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The difference
-is the 9.3% that anchor away from the pattern ends — resolved exactly under a
-full match, refused under a search, where the `.*p.*` rewrite has nowhere to
-put them. (Lookahead and fixed-width lookbehind are decided exactly under
+is the 9.8% — 75 references — that anchor away from the pattern ends: resolved
+exactly under a full match, refused under a search, where the `.*p.*` rewrite
+has nowhere to put them. Four references go the other way, refused under
+FULLMATCH because resolving their anchors exceeds the node budget and accepted
+under SEARCH because the fold means those anchors are never resolved, so the
+two counts differ by 71 rather than 75. (Lookahead and fixed-width lookbehind are decided exactly under
 both semantics; what a SEARCH refuses here is a `^` or `$` that no zero-width
 prefix or suffix can carry to the pattern edge.)
 
@@ -99,7 +102,7 @@ tasks means a vulnerable gold pattern raced the timeout.
 
 The `vulnerable@1` row is a property of the dataset rather than of this tool,
 and is roughly the point the paper is making — `regexeval/1660` above is one of
-the 97.
+the 100.
 
 ---
 
@@ -239,9 +242,11 @@ Measured on Re(gEx|DoS)Eval, one candidate costs about **75 ms**, split:
 **That equivalence figure is a `--use-reference` figure**, and `--use-reference`
 compares each pattern with itself, so `equivalent()` short-circuits on
 identical text and never builds an automaton. Against candidates that actually
-differ, the same corpus measures a median of **0.3 ms** and a mean of
-**191 ms** — the mean is the whole story, because the distribution has a long
-tail and the slowest single comparison took **13.6 s**. The expensive ones are
+differ, the same corpus measures a median of **3 ms** and a mean of
+**484 ms** — the mean is the whole story, because the distribution has a long
+tail and the slowest single comparison took **19 s**. Deciding lookaround
+rather than refusing it moved all three, because the patterns that used to
+come back UNSUPPORTED in microseconds are now answered. The expensive ones are
 wide alternations over large alphabets: date formats spelling out every month,
 or VAT numbers spelling out every country code.
 
@@ -249,7 +254,7 @@ Budget from the mean, not the median, and use `--workers`.
 
 Screening dominates, and it is the part that has to start processes: the only
 way to know a pattern hangs is to run it somewhere killable. A `--use-reference`
-pass over all 762 tasks takes about 20 seconds.
+pass over all 762 tasks takes about 25 seconds at `--workers 8`.
 
 Equivalence on the dk.brics corpora costs more, and varies by an order of
 magnitude between them:
@@ -269,7 +274,7 @@ answering is cheaper than answering. Use `--workers`.
 Vulnerable candidates cost more, and unavoidably so: confirming a hang means
 waiting out the timeout, once per example. A candidate that hangs on all 25 of
 a task's examples costs 25 seconds at the default one-second budget. That is
-not a rare case — 12.7% of the corpus's own references are vulnerable, so a
+not a rare case — 13.1% of the corpus's own references are vulnerable, so a
 model trained on this kind of data will produce plenty.
 
 Two levers:

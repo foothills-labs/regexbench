@@ -312,7 +312,8 @@ Known limits, in the order they cost you coverage:
 
 | Construct | Status |
 | --- | --- |
-| Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata; fixed-width lookbehind only |
+| `^` / `$` away from the pattern ends, under `SEARCH` | `UNSUPPORTED` — the `.*p.*` rewrite has nowhere to put them. 9.8% of Re(gEx|DoS)Eval; resolved exactly under `FULLMATCH` |
+| Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata. Refused for a variable-width lookbehind, one nested past the start of another's body, a `\b` immediately in front of one, or one inside a dk.brics `&`/`~` operand |
 | Backreferences | `UNDECIDABLE` — no engine can answer this |
 | `[\D0-9]` — a negated shorthand mixed with other members | `UNSUPPORTED` — not one character set |
 | Possessive quantifiers, atomic groups | `UNSUPPORTED` unless the body matches exactly one way |
