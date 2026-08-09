@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from typing import NoReturn
 
 from .types import Dialect, Semantics
 
@@ -53,6 +54,22 @@ SENTINELS = (UNNAMED_DIGIT, UNNAMED_WORD, UNNAMED_SPACE, UNNAMED_OTHER)
 # is the authority, since `check()` executes patterns with that same `re`. A
 # backport or a rebuilt interpreter would make a version test lie.
 NEGATED_BOUNDARY_MATCHES_EMPTY = re.search(r"\B", "") is not None
+
+
+def _re_accepts(pattern: str) -> bool:
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
+
+
+# Possessive quantifiers and atomic groups arrived in CPython 3.11. Probed for
+# the same reason the boundary rule is: `check()` and `screen()` run patterns
+# with the interpreter's own `re`, so answering a pattern that `re` here cannot
+# compile would contradict the other half of every verdict this tool produces.
+POSSESSIVE_SUPPORTED = _re_accepts("a*+")
+ATOMIC_GROUP_SUPPORTED = _re_accepts("(?>a)")
 
 _DIGITS = frozenset("0123456789")
 _WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -114,6 +131,29 @@ class NonRegular(Unsupported):
 
 class Node:
     pass
+
+
+class UnhandledNode(AssertionError):
+    """A walker was handed a node type it does not name.
+
+    Every walker over the AST ends in :func:`_unhandled` rather than a bare
+    `return False`, because the recurring way this engine has produced wrong
+    answers is a new node type that some walker never learned about. Python's
+    own `ast.NodeVisitor` defaults to a silent `generic_visit`; that default is
+    exactly the failure, so this goes the other way and fails loudly.
+
+    A node a walker genuinely does not care about is still named — in the
+    walker's leaf tuple — so "deliberately nothing to do" reads differently
+    from "nobody thought about it". `tests/test_walkers.py` runs every node
+    type through every walker and fails on this exception.
+    """
+
+
+def _unhandled(node: Node, walker: str) -> NoReturn:
+    raise UnhandledNode(
+        f"{walker} does not handle {type(node).__name__}; add it to the walker "
+        f"(or to its leaf tuple if there is genuinely nothing to do)"
+    )
 
 
 @dataclass(frozen=True)
@@ -339,9 +379,16 @@ def uses_assertions(node: Node) -> bool:
         return any(uses_assertions(part) for part in node.parts)
     if isinstance(node, Repeat):
         return uses_assertions(node.node)
-    if isinstance(node, Complement):
+    if isinstance(node, (Complement, Poss, Atomic)):
         return uses_assertions(node.node)
-    return False
+    if isinstance(node, Lookaround):
+        # An assertion inside a lookaround body belongs to that body's own
+        # constraint machine, which carries its own entry context, so it does
+        # not make the surrounding operand context-sensitive.
+        return False
+    if isinstance(node, (Empty, CharSet, Anchor)):
+        return False
+    _unhandled(node, "uses_assertions")
 
 
 def any_char() -> CharSet:
@@ -362,9 +409,13 @@ def _right_run_has_assert(node: Node) -> bool:
         return False
     if isinstance(node, Alternate):
         return any(_right_run_has_assert(o) for o in node.options)
-    if isinstance(node, Repeat):
+    if isinstance(node, (Repeat, Poss)):
         return node.maximum != 0 and _right_run_has_assert(node.node)
-    return False
+    if isinstance(node, Atomic):
+        return _right_run_has_assert(node.node)
+    if isinstance(node, (Empty, CharSet, Anchor, Lookaround, Intersect, Complement)):
+        return False
+    _unhandled(node, "_right_run_has_assert")
 
 
 def _left_run_has_lookaround(node: Node) -> bool:
@@ -380,9 +431,13 @@ def _left_run_has_lookaround(node: Node) -> bool:
         return False
     if isinstance(node, Alternate):
         return any(_left_run_has_lookaround(o) for o in node.options)
-    if isinstance(node, Repeat):
+    if isinstance(node, (Repeat, Poss)):
         return node.maximum != 0 and _left_run_has_lookaround(node.node)
-    return False
+    if isinstance(node, Atomic):
+        return _left_run_has_lookaround(node.node)
+    if isinstance(node, (Empty, CharSet, Assert, Anchor, Intersect, Complement)):
+        return False
+    _unhandled(node, "_left_run_has_lookaround")
 
 
 def _assert_meets_lookaround(node: Node) -> bool:
@@ -412,9 +467,11 @@ def _assert_meets_lookaround(node: Node) -> bool:
         return _assert_meets_lookaround(node.body)
     if isinstance(node, Intersect):
         return any(_assert_meets_lookaround(p) for p in node.parts)
-    if isinstance(node, Complement):
+    if isinstance(node, (Complement, Poss, Atomic)):
         return _assert_meets_lookaround(node.node)
-    return False
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return False
+    _unhandled(node, "_assert_meets_lookaround")
 
 
 def _refuse_lookaround_operand(parts: list[Node], operator: str) -> None:
@@ -437,9 +494,11 @@ def _contains_lookaround(node: Node) -> bool:
         return any(_contains_lookaround(p) for p in node.parts)
     if isinstance(node, Alternate):
         return any(_contains_lookaround(o) for o in node.options)
-    if isinstance(node, (Repeat, Complement)):
+    if isinstance(node, (Repeat, Complement, Poss, Atomic)):
         return _contains_lookaround(node.node)
-    return False
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return False
+    _unhandled(node, "_contains_lookaround")
 
 
 def _nested_fires_at_start(node: Node) -> bool:
@@ -476,7 +535,11 @@ def _nested_fires_at_start(node: Node) -> bool:
         return _nested_fires_at_start(node.node)
     if isinstance(node, (Intersect, Complement)):
         return not _contains_lookaround(node)
-    return True
+    if isinstance(node, (Poss, Atomic)):
+        return _nested_fires_at_start(node.node)
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return True
+    _unhandled(node, "_nested_fires_at_start")
 
 
 def _zero_width(node: Node) -> bool:
@@ -491,7 +554,11 @@ def _zero_width(node: Node) -> bool:
         return all(_zero_width(option) for option in node.options)
     if isinstance(node, Repeat):
         return node.minimum == 0 and node.maximum == 0
-    return False
+    if isinstance(node, (Poss, Atomic)):
+        return _zero_width(node.node)
+    if isinstance(node, (CharSet, Intersect, Complement)):
+        return False
+    _unhandled(node, "_zero_width")
 
 
 def _fold_edge_anchors(
@@ -609,7 +676,11 @@ def _nullable(node: Node) -> bool:
         # automaton; reading the body's nullability here made `(?=a)` look
         # like a consuming atom and collapsed `(?=a)^a` to the empty language.
         return True
-    return not _nullable(node.node)  # Complement
+    if isinstance(node, (Poss, Atomic)):
+        return _nullable(node.node)
+    if isinstance(node, Complement):
+        return not _nullable(node.node)
+    _unhandled(node, "_nullable")
 
 
 def _contains_anchor(node: Node) -> bool:
@@ -624,9 +695,15 @@ def _contains_anchor(node: Node) -> bool:
         return any(_contains_anchor(part) for part in node.parts)
     if isinstance(node, Alternate):
         return any(_contains_anchor(option) for option in node.options)
-    if isinstance(node, Repeat):
+    if isinstance(node, (Repeat, Poss, Atomic)):
         return _contains_anchor(node.node)
-    return False
+    if isinstance(node, Intersect):
+        return any(_contains_anchor(part) for part in node.parts)
+    if isinstance(node, Complement):
+        return _contains_anchor(node.node)
+    if isinstance(node, (Empty, CharSet, Assert)):
+        return False
+    _unhandled(node, "_contains_anchor")
 
 
 def _fixed_width(node: Node) -> int | None:
@@ -666,7 +743,11 @@ def _fixed_width(node: Node) -> int | None:
         if len(set(widths)) != 1:
             return None
         return widths[0]
-    return None  # Complement: its words are not all one length
+    if isinstance(node, (Poss, Atomic)):
+        return _fixed_width(node.node)
+    if isinstance(node, Complement):
+        return None  # its words are not all one length
+    _unhandled(node, "_fixed_width")
 
 
 # Resolving an anchor inside a concatenation enumerates which part carries it,
@@ -700,8 +781,10 @@ def _node_count(node: Node, sizes: dict[int, int]) -> int:
         total = 1 + _node_count(node.node, sizes)
     elif isinstance(node, Lookaround):
         total = 1 + _node_count(node.body, sizes)
-    else:
+    elif isinstance(node, (Empty, CharSet, Assert, Anchor)):
         total = 1
+    else:
+        _unhandled(node, "_node_count")
     sizes[id(node)] = total
     return total
 
@@ -948,6 +1031,13 @@ def _resolve_impl(
     return node, False
 
 
+def _operands(node: Node) -> tuple[Node, ...]:
+    """The child nodes of a branching node, whichever field holds them."""
+    if isinstance(node, Alternate):
+        return node.options
+    return node.parts  # Concat, Intersect
+
+
 def _epsilon_restrict(node: Node) -> Node:
     """The empty-string part of `node`, with its assertions kept.
 
@@ -977,7 +1067,12 @@ def _epsilon_restrict(node: Node) -> Node:
         # An intersection matches the empty string where every operand does,
         # so each operand's assertions still constrain the position.
         return Intersect(tuple(_epsilon_restrict(p) for p in node.parts))
-    return Empty()  # Complement: its ε part is unconstrained by what it negates
+    if isinstance(node, (Poss, Atomic)):
+        return _epsilon_restrict(node.node)
+    if isinstance(node, Complement):
+        # Its ε part is unconstrained by what it negates.
+        return Empty()
+    _unhandled(node, "_epsilon_restrict")
 
 
 def _join(nodes: list[Node]) -> Node:
@@ -1005,8 +1100,13 @@ def _ambiguous(node: Node) -> bool:
         # ambiguity only concerns the body's match, which decides the
         # assertion deterministically. So the group never adds ambiguity.
         return False
-    return False
-
+    if isinstance(node, (Poss, Atomic)):
+        return _ambiguous(node.node)
+    if isinstance(node, (Intersect, Complement)):
+        return True  # operand shape is not modelled; assume it can vary
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return False
+    _unhandled(node, "_ambiguous")
 
 def _sticky_problem(node: Node) -> bool:
     """Whether `node` contains a possessive repeat or an atomic group whose
@@ -1027,7 +1127,11 @@ def _sticky_problem(node: Node) -> bool:
         return _sticky_problem(node.node)
     if isinstance(node, Lookaround):
         return _sticky_problem(node.body)
-    return False
+    if isinstance(node, (Alternate, Intersect)):
+        return any(_sticky_problem(p) for p in _operands(node))
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return False
+    _unhandled(node, "_sticky_problem")
 
 
 def _finalize_sticky(node: Node, at_end: bool) -> Node:
@@ -1081,7 +1185,9 @@ def _finalize_sticky(node: Node, at_end: bool) -> Node:
         # inside the assertion, so a trailing possessive quantifier in the
         # body is as transparent as at the end of a branch.
         return Lookaround(node.kind, _finalize_sticky(node.body, at_end=True))
-    return node
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return node
+    _unhandled(node, "_finalize_sticky")
 
 
 class _Parser:
@@ -1178,6 +1284,10 @@ class _Parser:
                 self.eat()
             elif self.peek() == "+":
                 self.eat()
+                if not POSSESSIVE_SUPPORTED:
+                    raise Unsupported(
+                        "possessive quantifiers need CPython 3.11 or newer"
+                    )
                 node = Poss(node.node, node.minimum, node.maximum)
         return node
 
@@ -1319,6 +1429,8 @@ class _Parser:
         if self.peek() != ")":
             raise Unsupported("unbalanced parenthesis")
         self.eat()
+        if atomic and not ATOMIC_GROUP_SUPPORTED:
+            raise Unsupported("atomic groups need CPython 3.11 or newer")
         return Atomic(node) if atomic else node
 
     def _escape(self) -> Node:

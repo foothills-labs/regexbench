@@ -31,6 +31,7 @@ from collections.abc import Callable, Sequence
 import pytest
 
 from regexbench import Dialect, EquivalenceResult, Semantics, Verdict, equivalent
+from regexbench._syntax import SYNTAX, atoms_for, available
 
 Matcher = Callable[[str], bool]
 
@@ -517,3 +518,72 @@ def test_lookaround_verdicts_agree_with_re(seed: int, semantics: Semantics) -> N
         )
 
     assert checked > 30, "generator produced too few analyzable pairs to be meaningful"
+
+
+# --------------------------------------------------------------------------
+# The whole supported-syntax surface.
+#
+# The generators above are hand-written atom lists, and each was written after
+# a family of wrong verdicts had already shipped through the gap it covers:
+# escapes, then misplaced anchors, then lookaround. A list someone maintains by
+# hand tests what someone remembered.
+#
+# This one draws its atoms from `_syntax.SYNTAX`, the single declaration of
+# what the engine claims to support. `tests/test_syntax_surface.py` checks that
+# declaration against the parser's own tables in both directions, so a
+# construct cannot be supported without being generated here.
+
+SURFACE = generator(atoms_for(Dialect.PYTHON))
+SURFACE_CORPUS = corpus("ab", longest=3)
+
+
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(8))
+def test_whole_surface_verdicts_agree_with_re(seed: int, semantics: Semantics) -> None:
+    rng = random.Random(seed)
+    method = method_for(semantics)
+    checked = 0
+
+    for _ in range(150):
+        left, right = SURFACE(rng), SURFACE(rng)
+        try:
+            compiled_left, compiled_right = re.compile(left), re.compile(right)
+        except re.error:
+            continue
+
+        result = equivalent(left, right, semantics=semantics)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+        cross_check(
+            result,
+            matcher(compiled_left, method),
+            matcher(compiled_right, method),
+            SURFACE_CORPUS,
+            f"{method} of {left!r} and {right!r}",
+        )
+
+    assert checked > 10, "generator produced too few analyzable pairs to be meaningful"
+
+
+def test_the_generator_reaches_every_construct_it_claims() -> None:
+    """Grammar coverage: every declared construct has to actually be emitted.
+
+    A declaration the generator never reaches is worse than no declaration,
+    because it reads like coverage. This is the adequacy criterion the
+    grammar-fuzzing literature uses — every production exercised, rather than
+    a random walk that happens to visit some of them.
+    """
+    emitted: set[str] = set()
+    for seed in range(40):
+        rng = random.Random(seed)
+        for _ in range(200):
+            emitted.add(SURFACE(rng))
+
+    joined = "\n".join(emitted)
+    missing = [
+        c.atom
+        for c in SYNTAX
+        if c.dialect is Dialect.PYTHON and available(c) and c.atom not in joined
+    ]
+    assert not missing, f"declared but never generated: {missing}"
