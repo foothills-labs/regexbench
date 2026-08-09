@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 from .types import Dialect
 
-__all__ = ["Construct", "SYNTAX", "atoms_for", "available"]
+__all__ = ["CORPUS_ALPHABET", "Construct", "SYNTAX", "atoms_for", "available"]
 
 
 @dataclass(frozen=True)
@@ -120,6 +120,23 @@ SYNTAX: tuple[Construct, ...] = (
     Construct("brics-any", "@", dialect=Dialect.BRICS),
     Construct("brics-empty", "#", dialect=Dialect.BRICS),
 )
+
+
+#: The characters a differential corpus over this surface has to draw from.
+#:
+#: Deriving the generator's *atoms* from the surface is only half the job: a
+#: pair of patterns is only separated by a string that actually distinguishes
+#: them, so a corpus alphabet that misses a character class makes the whole
+#: family of differences over it invisible. The surface generator ran over
+#: strings of "a" and "b" and was silent about `$` for that reason — Python's
+#: `$` matches before a string-final newline, and no string in the corpus had
+#: one.
+#:
+#: So: one member and one non-member of every shorthand class the parser
+#: declares (`test_syntax_surface.py` pins that), a newline specifically
+#: because `$` treats it unlike any other character, and two plain letters so
+#: that literals and alternation are separable at all.
+CORPUS_ALPHABET = "ab1 \n-"
 
 
 def available(construct: Construct) -> bool:

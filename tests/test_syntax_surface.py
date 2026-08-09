@@ -30,7 +30,7 @@ from regexbench._parse import (
     Unsupported,
     parse,
 )
-from regexbench._syntax import SYNTAX, atoms_for, available
+from regexbench._syntax import CORPUS_ALPHABET, SYNTAX, atoms_for, available
 
 KEYS = {c.key for c in SYNTAX}
 
@@ -117,3 +117,29 @@ def test_refused_constructs_are_not_declared():
             parse(construct.atom, dialect=construct.dialect)
         except Unsupported as exc:  # pragma: no cover - the assert reports it
             pytest.fail(f"{construct.key} is declared but refused: {exc}")
+
+
+@pytest.mark.parametrize("letter", sorted(_CLASS_ESCAPES))
+def test_the_corpus_alphabet_separates_every_shorthand_class(letter):
+    r"""Each `\d`/`\w`/`\s` (and its negation) needs a member and a non-member.
+
+    Atoms drawn from the surface only find a difference if some string in the
+    corpus exercises it. An alphabet with no digit cannot separate `\d` from
+    `\w`; one with no newline cannot separate `b$` from `b`, because Python's
+    `$` also matches just before a string-final newline. That second gap is
+    not hypothetical — it is why the surface test was silent while `$` was
+    being folded as plain end-of-string.
+    """
+    inside = [c for c in CORPUS_ALPHABET if re.fullmatch(rf"\{letter}", c)]
+    outside = [c for c in CORPUS_ALPHABET if not re.fullmatch(rf"\{letter}", c)]
+    assert inside, rf"no character in the corpus alphabet matches \{letter}"
+    assert outside, rf"every character in the corpus alphabet matches \{letter}"
+
+
+def test_the_corpus_alphabet_contains_a_newline():
+    """Called out on its own because `$` is the construct that needs it.
+
+    A newline is a `\\s` member like any other to the classes above, so the
+    per-class test would pass with a space and no newline at all.
+    """
+    assert "\n" in CORPUS_ALPHABET

@@ -108,6 +108,70 @@ now covers them fails on all twelve of its seeds without these.
 
 ### Fixed
 
+Found by running two real-world corpora through the engine: 43,895 patterns
+used by PyPI packages, from the LinguaFranca polyglot corpus, cross-checked
+against `re` string by string. Three wrong-answer bugs, none of which the
+suite could reach at the time.
+
+- **An identity-keyed memo could read another node's answer.** Anchor
+  resolution memoises on `id(node)` but kept no reference to the node, and
+  resolution allocates and discards nodes constantly — so CPython handed a
+  freed address to the next allocation and the new node inherited the old
+  one's result. The symptom was a pattern that disagreed with `re` only when
+  another pattern had been resolved first in the same process, which is why
+  it took a 44,000-pattern run to surface and did not reproduce in isolation.
+  Both memo tables now hold their keys, and `tests/test_identity_cache.py`
+  asserts that directly with a weakref rather than trying to provoke a
+  collision.
+
+- **`$` was folded as plain end-of-string.** Without `re.MULTILINE`, Python's
+  `$` matches at the end of the subject *and* immediately before a newline
+  that ends it, so `re.fullmatch(r"a$\n", "a\n")` matches and
+  `re.search(r"b$", "b\n")` finds one. The engine treated `$` as the end
+  outright: `a$\n` came back as the empty language and so different from
+  `a\n`, and `(a|\n)b` was reported different from `(a|\n)b$` on a witness
+  `re` matches both ways.
+
+  Under SEARCH the reduction now allows exactly that one trailing newline
+  after the match, which is exact and costs no coverage. Under FULLMATCH
+  there is no wrapper to widen, and folding the anchor would have to
+  constrain the text after it, so a `$` in front of text that could be a
+  newline is refused instead — a `$` at the end of the pattern, the common
+  shape by far, is still decided. Nine of the 762 Re(gEx|DoS)Eval references
+  move from decided to refused under FULLMATCH as a result; the SEARCH count
+  the corpus is scored on is unchanged.
+
+- **An anchor nested inside a region a `$` collapsed was dropped.** `a$`
+  forces everything after it to be the empty string, and the resolver
+  collapsed that tail — but empty text still has a position, and the `^` in
+  `a$(^)+` demands position zero, which the `a` in front of it rules out. The
+  scan that finds anchors only looks at a concatenation's own parts, so a `^`
+  one group down went with the tail and `a$(^)+` came back matching `"a"`.
+  The tail is now resolved in both cases the middle allows — occupied, where
+  such an anchor cannot hold, and empty, where it holds exactly as the outer
+  context allows — so `a?$(^)+` still matches the empty string.
+
+### Changed
+
+- **The differential suite compares membership, not only verdicts.** A
+  verdict about a pair is only wrong when the two patterns are wrong in
+  *different* ways, so a rule the engine applies uniformly cancels out: the
+  `$` bug above produced one failure in 21,000 generated pairs. A new test
+  runs each generated pattern's automaton against `re` string by string,
+  which is the check the real-world corpora get, and it fails on the first
+  seed without the fix.
+
+  Two supporting gaps closed with it. The generator attached quantifiers to
+  every atom outside a hardcoded `\b`/`\B` list, so every draw of `^` or `$`
+  became `^*` and was discarded as a syntax error — it now asks `re` whether
+  the quantified atom compiles. And the corpus alphabet was `"ab"`, which
+  cannot express a difference that only shows on a newline; it is now
+  declared next to the atoms in `_syntax.CORPUS_ALPHABET` and pinned against
+  the parser's own class tables, so every shorthand class has a member and a
+  non-member in it.
+
+### Fixed
+
 - **Possessive quantifiers and atomic groups are refused where `re` refuses
   them.** Both arrived in CPython 3.11, so on 3.10 the engine was answering
   `(a*+)` and `(?>a)` — patterns the interpreter running `check()` and

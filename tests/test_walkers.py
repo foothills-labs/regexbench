@@ -92,6 +92,8 @@ WALKERS: dict[str, object] = {
     "_right_run_has_assert": lambda n: _parse._right_run_has_assert(n),
     "_left_run_has_lookaround": lambda n: _parse._left_run_has_lookaround(n),
     "_assert_meets_lookaround": lambda n: _parse._assert_meets_lookaround(n),
+    "_matches_newline": lambda n: _parse._matches_newline(n),
+    "_end_anchor_meets_newline": lambda n: _parse._end_anchor_meets_newline(n, True),
     "_epsilon_restrict": lambda n: _parse._epsilon_restrict(n),
     "_fixed_width": lambda n: _parse._fixed_width(n),
     "_node_count": lambda n: _parse._node_count(n, {}),
