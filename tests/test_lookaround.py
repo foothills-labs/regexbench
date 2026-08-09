@@ -187,3 +187,94 @@ def test_corpus_lookahead_is_stronger_than_the_plain_number_pattern():
     assert result.verdict is Verdict.DIFFERENT
     assert result.witness is not None and re.search(plain, result.witness) is not None
     assert re.search(guarded, result.witness) is None
+
+
+# --------------------------------------------------------------------------
+# Regressions from the audit of the lookaround feature. Each of these was a
+# wrong verdict — not a refusal — before the fix named in its docstring.
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        # `_epsilon_restrict` dropped the assertion when a region collapsed to
+        # the empty string, so a negative lookahead that forbids everything
+        # vanished and the branch became reachable.
+        (r"(?!a?)a", r"a"),
+        (r"(?!)a", r"a"),
+        (r"(?!(?:ab)*)a", r"a"),
+    ],
+)
+def test_a_collapsed_region_keeps_its_lookaround(left, right):
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.DIFFERENT, result.reason
+    assert re.fullmatch(left, "a") is None and re.fullmatch(right, "a") is not None
+
+
+@pytest.mark.parametrize("left,right", [(r"(?=a)^a", r"a"), (r"a$(?!b)", r"a")])
+def test_a_lookaround_is_zero_width_for_anchor_resolution(left, right):
+    """`_nullable` read the body's nullability, so `(?=a)` looked like a
+    consuming atom and the `^` behind it collapsed the branch to nothing."""
+    assert equivalent(left, right).verdict is Verdict.EQUIVALENT
+    assert re.fullmatch(left, "a") is not None
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        # The constraint automaton enters the body mid-string, so the body has
+        # to be built for the context it actually starts in. Built once as
+        # "start of string", `\ba` inside the lookbehind wrongly held.
+        (r"aa(?<=\ba)", r"aa"),
+        (r"aa(?<=^a)", r"aa"),
+        (r"a(?=\ba)a", r"aa"),
+    ],
+)
+def test_an_assertion_body_sees_the_position_it_fires_at(left, right):
+    result = equivalent(left, right)
+    assert result.verdict is Verdict.DIFFERENT, result.reason
+    assert re.fullmatch(left, "aa") is None
+
+
+def test_a_lookaround_nested_at_the_body_start_is_still_decided():
+    """It fires where the outer one does, so chaining the markers is right."""
+    assert equivalent(r"(?=(?=^a))a", r"a").verdict is Verdict.EQUIVALENT
+    assert equivalent(r"(?=(?!b))a", r"a").verdict is Verdict.EQUIVALENT
+
+
+@pytest.mark.parametrize("pattern", [r"(?=a(?=b))ab", r"(?<=a(?=b))b"])
+def test_a_lookaround_nested_past_the_body_start_is_refused(pattern):
+    """The inner assertion fires a character into the body, not where the
+    outer one does, so its marker cannot ride the outer's edge."""
+    assert equivalent(pattern, "x").verdict is Verdict.UNSUPPORTED
+
+
+@pytest.mark.parametrize("pattern", [r"\b(?=a)a", r"\B(?=a)", r"(\b(?=a))*"])
+def test_a_boundary_immediately_before_a_lookaround_is_refused(pattern):
+    """A marker fires before any character is consumed, and a `\\b` is only
+    crossed while consuming one, so the boundary could never be crossed and
+    the branch silently matched nothing."""
+    assert equivalent(pattern, "x").verdict is Verdict.UNSUPPORTED
+
+
+@pytest.mark.parametrize("left,right", [(r"(?=a)\ba", r"a"), (r"\ba(?=b)b", r"ab")])
+def test_a_boundary_elsewhere_around_a_lookaround_still_decides(left, right):
+    """Only the boundary-then-marker order is broken; the refusal must not
+    swallow the orders that work."""
+    assert equivalent(left, right).verdict is Verdict.EQUIVALENT
+
+
+def test_folding_both_edge_anchors_away_does_not_crash():
+    """`_fold_edge_anchors` emptied its parts list and built `Concat(())`,
+    which `_emit` indexed with `parts[-1]`."""
+    result = equivalent("(^)($)", "a", semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.DIFFERENT
+
+
+def test_a_lookaround_inside_a_brics_operand_is_refused():
+    """The operand is entered through a context gate that cannot carry the
+    preceding text a lookbehind needs."""
+    from regexbench import Dialect
+
+    result = equivalent(r"a(((?<=a)b)&(b))", "ab", dialect=Dialect.BRICS)
+    assert result.verdict is Verdict.UNSUPPORTED
