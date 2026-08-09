@@ -62,26 +62,27 @@ tasks = load_regexeval("RegexEval.json")
 analyzable = sum(
     is_regular(t.reference, semantics=t.semantics, dialect=t.dialect) for t in tasks
 )
-print(f"{analyzable}/{len(tasks)}")     # 669/762 = 87.8%
+print(f"{analyzable}/{len(tasks)}")     # 660/762 = 86.6%
 ```
 
 | Corpus | References this engine can parse |
 | --- | --- |
-| Re(gEx|DoS)Eval | 87.8% |
+| Re(gEx|DoS)Eval | 86.6% |
 | KB13 | 100% |
 | NL-RX-Synth / NL-RX-Turk | 100% |
 
 **Pass the corpus's own `semantics`.** It changes the answer, and the default
 flatters this corpus: 731 of the 762 references parse under FULLMATCH (95.9%)
-but 669 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The difference
+but 660 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The difference
 is the 9.8% — 75 references — that anchor away from the pattern ends: resolved
 exactly under a full match, refused under a search, where the `.*p.*` rewrite
-has nowhere to put them. Thirteen references go the other way, refused under
-FULLMATCH — nine because a `$` sits in front of text that could be the
-subject's final newline, which the search reduction handles exactly and anchor
-resolution refuses, and four because resolving their anchors exceeds the node
-budget — and accepted under SEARCH because the fold means those anchors are
-never resolved, so the two counts differ by 62 rather than 75.
+has nowhere to put them, plus nine more whose `$` sits inside a lookaround
+body, where a search subject can always carry one more newline. Thirteen
+references go the other way, refused under FULLMATCH — nine because a `$` sits
+in front of text that could be the subject's final newline, and four because
+resolving their anchors exceeds the node budget — and accepted under SEARCH
+because the fold means those anchors are never resolved, so the two counts
+differ by 71 rather than 84.
 (Lookahead and fixed-width lookbehind are decided exactly under
 both semantics; what a SEARCH refuses here is a `^` or `$` that no zero-width
 prefix or suffix can carry to the pattern edge.)
@@ -211,8 +212,8 @@ number cannot answer both:
   what we could check, how much was correct" — the model on its own, blind to
   engine coverage.
 
-Re(gEx|DoS)Eval makes the spread concrete: 87.8% of its references parse under
-the search semantics it is scored with, so on the other 12.1% every candidate
+Re(gEx|DoS)Eval makes the spread concrete: 86.6% of its references parse under
+the search semantics it is scored with, so on the other 13.4% every candidate
 that is not textually identical comes back undecidable and scores zero under
 the first reading. Watch both, and treat a gap between them as a statement
 about this engine rather than about whatever you are scoring.
@@ -301,31 +302,61 @@ for after seeing the number.
 ## Validation corpora
 
 The corpora above are what a score is *reported* on. They are not enough to
-trust the engine, because a corpus of 762 curated references exercises the
-constructs a curator chose. Three larger corpora of regexes written by people
-who were not thinking about this tool are used to check the engine instead,
-all from the [LinguaFranca FSE'19 artifact](https://github.com/VTLeeLab/LinguaFranca-FSE19).
+trust the engine, because 762 curated references exercise the constructs a
+curator chose. Three larger corpora of regexes written by people who were not
+thinking about this tool are used to check the engine instead, all from the
+[LinguaFranca FSE'19 artifact](https://github.com/VTLeeLab/LinguaFranca-FSE19)
+(MIT):
 
-Each pattern is parsed, compiled to a DFA over a small alphabet drawn from its
-own literals plus one character it never names, and every string up to three
-characters over that alphabet is compared against `re.fullmatch`. A refusal is
-not a failure — it is a stated answer. A disagreement is.
+| | Unique patterns | File |
+| --- | --- | --- |
+| Production | 537,806 (43,896 used by PyPI modules) | `data/production-regexes/uniq-regexes-8.json` |
+| Stack Overflow | 495,135 | `data/internet-regexes/stackoverflow/data/` |
+| RegExLib | 3,838 | `data/internet-regexes/regexlib/data/` |
 
-| Corpus | Unique patterns | `re` compiles | Analyzable | Cross-checked | String comparisons | Disagreements |
-| --- | --- | --- | --- | --- | --- | --- |
-| Production (PyPI) | 43,895 | 43,761 | 41,927 (95.8%) | 41,741 | 5,865,274 | 0 |
-| Stack Overflow | 495,135 | 438,563 | 410,151 (93.5%) | 32,977 | 4,704,734 | 0 |
-| RegExLib | 3,838 | 3,446 | 3,198 (92.8%) | 2,983 | 453,233 | 0 |
+```python
+from regexbench import crosscheck
+from regexbench.datasets import load_linguafranca
 
-No crashes, and one pattern out of 485,770 took longer than five seconds to
-parse. The Stack Overflow row cross-checks a 40,000-pattern sample of its
-438,563, not all of them; the analyzable column is the full sweep.
+patterns = load_linguafranca("uniq-regexes-8.json", registry="pypi")
+bad = [p for p in patterns if not crosscheck(p)]
+```
 
-These runs are how the four wrong-answer bugs listed under *Fixed* in the
-changelog were found — an identity-keyed memo that could read another node's
-answer, `$` folded as plain end-of-string, an anchor dropped from a region a
-`$` collapsed, and chained assertion markers firing as alternatives. None of
-them was reachable by the test suite at the time, and each is now.
+or, the same thing with a progress meter and a breakdown of the refusals:
+
+```bash
+regexbench crosscheck uniq-regexes-8.json --registry pypi
+regexbench crosscheck uniq-regexes-8.json --registry pypi --search
+```
+
+`crosscheck` compiles the pattern to a DFA over a small alphabet — up to four
+of its own literals, one character it never names, and a newline — and compares
+every string up to three characters against `re`. A refusal is not a failure;
+it is a stated answer, and it is counted separately.
+
+| Corpus | Semantics | Crosschecked | Strings compared | Unchecked | Disagreements |
+| --- | --- | --- | --- | --- | --- |
+| Production (PyPI) | fullmatch | 41,741 | 8,000,925 | 2,155 | 0 |
+| Production (PyPI) | search | 40,913 | 7,423,707 | 2,983 | 0 |
+| Stack Overflow¹ | fullmatch | 33,212 | 6,217,008 | 6,788 | 0 |
+| Stack Overflow¹ | search | 28,462 | 5,059,284 | 11,538 | 0 |
+| RegExLib | fullmatch | 2,979 | 671,414 | 859 | 0 |
+| RegExLib | search | 2,898 | 534,573 | 940 | 0 |
+
+¹ the first 40,000 of its 495,135, which is where the sweep was bounded, not
+where it stopped finding things.
+
+**Restrict the production corpus to one registry.** The other seven languages'
+regexes are written against engines with syntax `re` does not have, so counting
+those as unsupported measures the dialect gap rather than this engine.
+
+These runs are how six wrong-answer bugs were found: an identity-keyed memo
+that could read another node's answer, `$` folded as plain end-of-string, an
+anchor dropped from a region a `$` collapsed, chained assertion markers firing
+as alternatives, `$` inside a lookaround body under search, and a word boundary
+at the right edge of a lookbehind window. None was reachable by the test suite
+at the time; each is now, and 355 of these patterns are checked in under
+`tests/data/` so the suite keeps running real-world syntax without a download.
 
 ## References
 

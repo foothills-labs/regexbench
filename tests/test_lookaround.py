@@ -181,15 +181,92 @@ def test_corpus_lookaround_reference_passes_its_own_labels(task):
     )
 
 
-def test_corpus_lookahead_is_stronger_than_the_plain_number_pattern():
-    # The all-zero guard is real: "0" is rejected by the lookahead version
-    # and accepted without it, so the two are not equivalent.
-    guarded = r"(?!^0*$)(?!^0*\.0*$)^\d{1,5}(\.\d{1,3})?$"
-    plain = r"^\d{1,5}(\.\d{1,3})?$"
-    result = equivalent(guarded, plain, semantics=Semantics.SEARCH)
-    assert result.verdict is Verdict.DIFFERENT
-    assert result.witness is not None and re.search(plain, result.witness) is not None
-    assert re.search(guarded, result.witness) is None
+GUARDED_NUMBER = r"(?!^0*$)(?!^0*\.0*$)^\d{1,5}(\.\d{1,3})?$"
+PLAIN_NUMBER = r"^\d{1,5}(\.\d{1,3})?$"
+
+
+def test_a_dollar_inside_a_lookaround_body_is_refused_under_search():
+    r"""This corpus pattern used to be decided, and decided wrongly.
+
+    The all-zero guard is real — `re` rejects "0" with the lookaheads and
+    accepts it without — so the two patterns differ, and the engine said so.
+    It got there by folding the `$` inside `(?!^0*$)` as plain end-of-string,
+    which is not what Python's `$` means: on "0\n" that `$` matches before the
+    subject's final newline, the guard fires, and `re` rejects the string. The
+    engine had the guard not firing and accepted it.
+
+    Under a search the subject can always carry one more newline, so there is
+    no shape of this the fold gets right. It is refused now. The `^`/`$` at
+    the pattern's own edges still fold through a leading run of lookarounds,
+    which is what this pattern was originally added to cover.
+    """
+    result = equivalent(GUARDED_NUMBER, PLAIN_NUMBER, semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+    assert "lookaround body" in result.reason
+
+    # The wrong answer it used to give, kept as the reason the refusal exists.
+    assert re.search(GUARDED_NUMBER, "0\n") is None
+    assert re.search(PLAIN_NUMBER, "0\n") is not None
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"a(?=b$)", r"^.*?(?=,|$)", r"(?!^0*$)\d", r"(?=^a$)a", r"(?<=a$)b"],
+)
+def test_every_dollar_in_a_body_is_refused_under_search(pattern):
+    """`a(?=b$)` matched "ab" and missed "ab\n", which `re` finds."""
+    result = equivalent(pattern, "x", semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"(?<=\b)a",
+        r"(?<!\b)a",
+        r"(?<=\B)a",
+        r"(?<=a\b)b",
+        r"(?<=\b)-?\d+(?=\b)",
+        r"(?<=\d\b)(?!,)",
+    ],
+)
+def test_a_boundary_at_the_end_of_a_lookbehind_body_is_refused(pattern):
+    r"""The window a lookbehind reads cannot see past its own right edge.
+
+    A lookbehind is certified by a sliding window over the text already read,
+    and the window ends where the assertion fires. A `\b` on that edge needs
+    the character *after* the window, which is the one thing the window
+    cannot carry: `(?<=\b)a` was certified as "preceded by a word character,
+    so no boundary" and rejected "a", and `(?<=\d\b)(?!,)` found a match in
+    "0z" where `re` finds none.
+
+    Both came out of real-world corpora, and the second only under search —
+    which is why the sweep runs both semantics.
+    """
+    result = equivalent(pattern, "x")
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+    assert "word boundary" in result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern", [r"(?<=\ba)b", r"(?<=a\bb)c", r"(?<=)a", r"(?<=^)a", r"(?=\b)a"]
+)
+def test_a_boundary_inside_a_lookbehind_body_is_still_decided(pattern):
+    """The refusal is drawn at the right edge and no wider.
+
+    At the body's left edge the entry context carries the preceding
+    character; in the middle both sides are inside the window. Only the right
+    edge looks at text the window does not hold.
+    """
+    result = equivalent(pattern, pattern)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
+
+
+@pytest.mark.parametrize("pattern", [r"a(?=b^)", r"(?=^a)a", r"(?!^a)b"])
+def test_a_caret_in_a_body_is_still_decided_under_search(pattern):
+    """`^` has no newline rule — it is position zero and nothing else."""
+    result = equivalent(pattern, pattern, semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
 
 
 # --------------------------------------------------------------------------

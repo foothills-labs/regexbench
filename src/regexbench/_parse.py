@@ -360,6 +360,18 @@ def parse(
         node, anchored_flags = _fold_edge_anchors(node, parser)
         if _contains_anchor(node):
             raise Unsupported("anchors are only supported at the pattern edges")
+        # `_contains_anchor` does not look inside a lookaround body, because an
+        # anchor there is meaningful rather than misplaced — `(?=^a)` says the
+        # match begins the subject. A `$` there is a different matter: the
+        # subject can always carry one more newline under a search, and the
+        # anchor is folded as plain end-of-string, so `a(?=b$)` missed "ab\n".
+        # The full-match branch below refuses the same shape.
+        if _end_anchor_meets_newline(node, True):
+            raise Unsupported(
+                "`$` inside a lookaround body is not supported under search "
+                "semantics; Python's `$` also matches just before a "
+                "string-final newline"
+            )
         if anchored_flags[1]:
             # A folded `$` still allows one trailing newline — Python's `$`
             # matches just before a newline that ends the subject, and the
@@ -1594,6 +1606,23 @@ class _Parser:
                 self.eat()
                 if opened in ("<=", "<!") and _fixed_width(body) is None:
                     raise Unsupported("look-behind requires fixed-width pattern")
+                if opened in ("<=", "<!") and _right_run_has_assert(body):
+                    # A lookbehind is certified by a sliding window over the
+                    # text already read, and the window ends where the
+                    # assertion fires. A `\b` on that right edge needs the
+                    # character *after* the window, which is the one thing the
+                    # window cannot see — so `(?<=\b)a` was certified as
+                    # "preceded by a word character, no boundary" and rejected
+                    # "a", and `(?<=\d\b)(?!,)` found a match in "0z" where
+                    # `re` finds none.
+                    #
+                    # A boundary anywhere else in the body is fine: at the left
+                    # edge the entry context carries the preceding character,
+                    # and in the middle both sides are inside the window.
+                    raise Unsupported(
+                        "a word boundary at the end of a lookbehind body is "
+                        "not supported"
+                    )
                 if not _nested_fires_at_start(body):
                     raise Unsupported(
                         "a lookaround nested past the start of another's body "

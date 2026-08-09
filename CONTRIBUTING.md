@@ -70,6 +70,35 @@ For constructs `re` has no equivalent of, ground truth can usually still be
 built. Intersection is computable per operand, and lookaround expresses it with
 the surrounding context intact.
 
+**Compare membership, not only verdicts.** A verdict about a pair only goes
+wrong when the two patterns go wrong in *different* ways, so a rule the engine
+applies uniformly cancels out of the pairwise tests entirely — folding `$` as
+plain end-of-string produced one bad verdict in 21,000 generated pairs, and a
+disagreement on the first pattern ending in `$` once membership was compared
+directly. `test_every_generated_pattern_accepts_what_re_accepts` is that check
+over the generators; `crosscheck()` is the same thing as a public function.
+
+## Real-world corpora
+
+`tests/test_real_world.py` runs 355 patterns from `tests/data/` — regexes
+extracted from PyPI packages, Stack Overflow posts and regexlib.com — through
+`crosscheck` under both semantics. Six wrong-answer bugs came out of those
+corpora, and the first ten patterns in the fixture are the ones that found
+them.
+
+The fixture is a sample. To sweep the real thing, download a corpus from the
+[LinguaFranca artifact](https://github.com/VTLeeLab/LinguaFranca-FSE19) and:
+
+```bash
+regexbench crosscheck uniq-regexes-8.json --registry pypi
+regexbench crosscheck uniq-regexes-8.json --registry pypi --search
+```
+
+Both semantics, always: two of the six only ever showed up under one of them.
+Worth doing before any release, and after any change to the parser or the
+automata layer. A refusal is not a failure — the command counts those
+separately and only exits non-zero on a disagreement.
+
 ## Style
 
 - Comments explain **why**, not what.
@@ -80,9 +109,13 @@ the surrounding context intact.
 ## Before opening a pull request
 
 ```bash
-pytest -q          # all tests, including the differential suite
+pytest -q          # all tests, including the differential and corpus suites
 ruff check .
 python -m build && twine check dist/*
 ```
+
+If you touched the parser or the automata, sweep a full corpus too — see
+*Real-world corpora* above. The checked-in fixture is 355 patterns; the corpora
+are half a million, and that is where the last six bugs were.
 
 If your change moves a documented number, update the number.
