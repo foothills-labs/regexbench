@@ -10,9 +10,9 @@ class Verdict(enum.Enum):
     """The answer to "are these two patterns the same language?"
 
     UNDECIDABLE is not a failure to compute — it is the correct answer when a
-    pattern uses backreferences or lookaround, which make the language
-    non-regular and equivalence formally undecidable. Reporting a guess there
-    would be worse than reporting nothing.
+    pattern uses backreferences, which make the language non-regular and
+    equivalence formally undecidable. Reporting a guess there would be worse
+    than reporting nothing.
     """
 
     EQUIVALENT = "equivalent"

@@ -34,13 +34,13 @@ and equivalence is then formally undecidable. Rather than guess, the verdict is
 
 ```python
 equivalent(r"(a)\1", r"aa").verdict     # <Verdict.UNDECIDABLE>
-equivalent(r"(?=a)ab", r"ab").verdict   # <Verdict.UNSUPPORTED>
+equivalent(r"(?=a)ab", r"ab").verdict   # <Verdict.EQUIVALENT>
 ```
 
-The two are kept apart on purpose. Lookaround *is* regular — it only escapes
-the regular languages when combined with backreferences — so refusing it is a
-statement about this engine, not about the problem. `UNDECIDABLE` means nothing
-can answer; `UNSUPPORTED` means this does not.
+The two are kept apart on purpose. Lookaround is regular — it only escapes the
+regular languages when combined with backreferences — so it is decided exactly
+(lookahead and fixed-width lookbehind), and `UNDECIDABLE` is reserved for
+patterns where nothing can answer.
 
 **Shorthand classes follow `re`, which means Unicode.** `\d` matches every
 Unicode digit, so it is not `[0-9]`:
@@ -230,8 +230,8 @@ questions. The plain figure counts undecidable comparisons as failures: how
 much of the corpus was *verified* correct, a lower bound that cannot flatter.
 The `(decided)` figure drops those tasks from the denominator: how much of what
 could be checked was correct, the model alone. On Re(gEx|DoS)Eval the spread is
-the engine's coverage: 82.5% of its references parse under the search
-semantics it is scored with, so on the other 17.5% every candidate that is not
+the engine's coverage: 87.9% of its references parse under the search
+semantics it is scored with, so on the other 12.1% every candidate that is not
 textually identical comes back undecidable and scores zero under the first
 reading. (KB13 used to be the example here, when word boundaries were refused;
 all three dk.brics corpora parse in full now.)
@@ -312,7 +312,7 @@ Known limits, in the order they cost you coverage:
 
 | Construct | Status |
 | --- | --- |
-| Lookaround | `UNSUPPORTED` — regular, not built. 5.6% of Re(gEx|DoS)Eval |
+| Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata; fixed-width lookbehind only |
 | Backreferences | `UNDECIDABLE` — no engine can answer this |
 | `[\D0-9]` — a negated shorthand mixed with other members | `UNSUPPORTED` — not one character set |
 | Possessive quantifiers, atomic groups | `UNSUPPORTED` unless the body matches exactly one way |

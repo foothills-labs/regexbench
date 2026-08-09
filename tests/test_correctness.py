@@ -89,7 +89,7 @@ def test_examples_do_not_overrule_a_proven_difference():
 
 def test_an_unanswerable_comparison_does_not_condemn_a_passing_pattern():
     """UNSUPPORTED means the engine could not answer, not that the answer is no."""
-    task = Task(positives=["ab"], negatives=["ba"], reference=r"(?=a)ab")
+    task = Task(positives=["ab"], negatives=["ba"], reference=r"(?<=a+)b")
     report = evaluate("ab", task)
 
     assert report.equivalence.verdict is Verdict.UNSUPPORTED
