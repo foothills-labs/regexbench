@@ -23,6 +23,7 @@ A seeded generator keeps failures reproducible.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import random
 import re
@@ -31,7 +32,9 @@ from collections.abc import Callable, Sequence
 import pytest
 
 from regexbench import Dialect, EquivalenceResult, Semantics, Verdict, equivalent
-from regexbench._syntax import SYNTAX, atoms_for, available
+from regexbench._automata import build_dfa
+from regexbench._parse import Unsupported, parse
+from regexbench._syntax import CORPUS_ALPHABET, SYNTAX, atoms_for, available
 
 Matcher = Callable[[str], bool]
 
@@ -52,13 +55,32 @@ def corpus(alphabet: str, longest: int = 3) -> list[str]:
     ]
 
 
+@functools.cache
+def _compiles(pattern: str) -> bool:
+    """Whether `re` accepts `pattern` — memoised, since the atoms repeat."""
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
+
+
 def generator(atoms: Sequence[str]) -> Callable[[random.Random, int], str]:
-    """A seeded random pattern builder drawing from `atoms`."""
+    """A seeded random pattern builder drawing from `atoms`.
+
+    A quantifier is only attached when the result compiles. Asking `re` beats
+    the hardcoded exception list this used to carry: that list named `\\b` and
+    `\\B`, so every draw of `^` or `$` became `^*` or `$+` and was thrown away
+    as a syntax error. Anchors were then all but absent from the surface run —
+    which is how a trailing `$` went unchecked while it was being folded as
+    plain end-of-string.
+    """
 
     def build(rng: random.Random, depth: int = 0) -> str:
         pattern = rng.choice(atoms)
-        if pattern not in ZERO_WIDTH:
-            pattern += rng.choice(QUANTIFIERS)
+        quantifier = rng.choice(QUANTIFIERS)
+        if quantifier and _compiles(pattern + quantifier):
+            pattern += quantifier
         if depth < 2 and rng.random() < 0.5:
             pattern += build(rng, depth + 1)
         return pattern
@@ -534,7 +556,10 @@ def test_lookaround_verdicts_agree_with_re(seed: int, semantics: Semantics) -> N
 # construct cannot be supported without being generated here.
 
 SURFACE = generator(atoms_for(Dialect.PYTHON))
-SURFACE_CORPUS = corpus("ab", longest=3)
+# The alphabet is declared next to the atoms, and pinned against the parser's
+# own class tables, for the same reason the atoms are: a corpus that cannot
+# express a difference hides it. "ab" could not, and `$` went unchecked.
+SURFACE_CORPUS = corpus(CORPUS_ALPHABET, longest=3)
 
 
 @pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
@@ -587,3 +612,49 @@ def test_the_generator_reaches_every_construct_it_claims() -> None:
         if c.dialect is Dialect.PYTHON and available(c) and c.atom not in joined
     ]
     assert not missing, f"declared but never generated: {missing}"
+
+
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(8))
+def test_every_generated_pattern_accepts_what_re_accepts(
+    seed: int, semantics: Semantics
+) -> None:
+    """One pattern's automaton against `re`, string by string.
+
+    The tests above compare *verdicts* about pairs, and a verdict is only
+    wrong when two patterns are wrong in different ways — so a rule the whole
+    engine applies uniformly hides from them. Python's `$` also matches just
+    before a string-final newline; this engine folded it as plain
+    end-of-string, and over 21,000 generated pairs that produced exactly one
+    failure, by luck rather than by coverage.
+
+    Comparing membership directly has no such cancellation: `b$` against
+    "b\\n" is a one-pattern, one-string disagreement. This is the check the
+    real-world corpora are run through, brought into the suite.
+    """
+    rng = random.Random(seed)
+    accepts = method_for(semantics)
+    checked = 0
+
+    for _ in range(150):
+        pattern = SURFACE(rng)
+        try:
+            compiled = re.compile(pattern)
+        except re.error:
+            continue
+        try:
+            node, literals = parse(pattern, semantics=semantics)
+            dfa = build_dfa(node, tuple(sorted(set(CORPUS_ALPHABET) | set(literals))))
+        except Unsupported:
+            continue  # a stated refusal is not a wrong answer
+
+        checked += 1
+        ground_truth = matcher(compiled, accepts)
+        for text in SURFACE_CORPUS:
+            assert dfa.accepts(text) == ground_truth(text), (
+                f"{pattern!r} under {semantics.name}: automaton "
+                f"{'accepts' if dfa.accepts(text) else 'rejects'} {text!r}, "
+                f"`re`.{accepts} says otherwise"
+            )
+
+    assert checked > 20, "too few analyzable patterns to be meaningful"

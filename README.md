@@ -273,6 +273,14 @@ full-match semantics `^` can only hold where everything before it is empty, so
 strings Python matches. Under `SEARCH` semantics an anchor away from the ends
 is refused instead: the `.*p.*` rewrite cannot express it.
 
+`$` is not end-of-string. Without `re.MULTILINE`, Python's `$` also matches
+immediately before a newline that ends the subject, so `re.search(r"b$", "b\n")`
+finds a match and `re.fullmatch(r"a$\n", "a\n")` is not the empty language.
+Under `SEARCH` the reduction allows exactly that one trailing newline. Under
+`FULLMATCH` there is nothing to widen, so a `$` sitting in front of text that
+could be that newline is refused; a `$` at the end of the pattern is decided as
+usual.
+
 Patterns Python's own parser rejects are rejected here too — `a**`, `\b*`,
 `\q`, `[\d-z]`. A pattern that cannot run under `re` should not get a verdict
 from a tool whose correctness and ReDoS halves both run `re`.
@@ -314,6 +322,7 @@ Known limits, in the order they cost you coverage:
 | --- | --- |
 | `^` / `$` away from the pattern ends, under `SEARCH` | `UNSUPPORTED` — the `.*p.*` rewrite has nowhere to put them. 9.8% of Re(gEx|DoS)Eval; resolved exactly under `FULLMATCH` |
 | Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata. Refused for a variable-width lookbehind, one nested past the start of another's body, a `\b` immediately in front of one, or one inside a dk.brics `&`/`~` operand |
+| `$` before text that could be the subject's final newline, under `FULLMATCH` | `UNSUPPORTED` — Python's `$` matches there too, and folding the anchor cannot say so. 1.2% of Re(gEx|DoS)Eval; exact under `SEARCH` |
 | Backreferences | `UNDECIDABLE` — no engine can answer this |
 | `[\D0-9]` — a negated shorthand mixed with other members | `UNSUPPORTED` — not one character set |
 | Possessive quantifiers, atomic groups | `UNSUPPORTED` unless the body matches exactly one way |

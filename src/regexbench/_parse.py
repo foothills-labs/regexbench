@@ -361,6 +361,11 @@ def parse(
         if _contains_anchor(node):
             raise Unsupported("anchors are only supported at the pattern edges")
     else:
+        if _end_anchor_meets_newline(node, False):
+            raise Unsupported(
+                "`$` before text that can match a newline is not supported; "
+                "Python's `$` also matches just before a string-final newline"
+            )
         node, _ = _resolve_anchors(node, prefix_nullable=True, suffix_nullable=True)
     if semantics is Semantics.SEARCH:
         node = _widen_for_search(node, *anchored_flags)
@@ -397,7 +402,7 @@ def any_char() -> CharSet:
 
 
 def _right_run_has_assert(node: Node) -> bool:
-    """Whether a match of `node` can end on an unresolved `\b`/`\B`."""
+    r"""Whether a match of `node` can end on an unresolved `\b`/`\B`."""
     if isinstance(node, Assert):
         return True
     if isinstance(node, Concat):
@@ -472,6 +477,82 @@ def _assert_meets_lookaround(node: Node) -> bool:
     if isinstance(node, (Empty, CharSet, Assert, Anchor)):
         return False
     _unhandled(node, "_assert_meets_lookaround")
+
+
+def _matches_newline(node: Node) -> bool:
+    """Whether `node` can match the one-character string "\\n".
+
+    Over-approximated on purpose: every caller uses this to decide whether to
+    refuse, so answering "yes" when the truth is "no" costs coverage and
+    answering "no" when the truth is "yes" costs correctness. Concatenation
+    ignores whether the other parts are nullable, and a complement is assumed
+    to contain the newline, both in the safe direction.
+    """
+    if isinstance(node, CharSet):
+        return node.accepts("\n")
+    if isinstance(node, Concat):
+        return any(_matches_newline(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return any(_matches_newline(option) for option in node.options)
+    if isinstance(node, Intersect):
+        return any(_matches_newline(part) for part in node.parts)
+    if isinstance(node, (Repeat, Poss)):
+        return node.maximum != 0 and _matches_newline(node.node)
+    if isinstance(node, Atomic):
+        return _matches_newline(node.node)
+    if isinstance(node, Complement):
+        return True
+    if isinstance(node, (Empty, Assert, Anchor, Lookaround)):
+        return False  # zero-width: matches the empty string, never "\n"
+    _unhandled(node, "_matches_newline")
+
+
+def _end_anchor_meets_newline(node: Node, after_newline: bool) -> bool:
+    r"""Whether some `$` in `node` can have exactly a newline after it.
+
+    Python's `$` is not "end of string": without `re.MULTILINE` it matches at
+    the end *and* immediately before a newline that ends the string, so
+    `re.fullmatch(r"a$\n", "a\n")` matches. Everything downstream here folds
+    `$` away as plain end-of-string, which is the same thing whenever the
+    text after the anchor cannot be that one trailing newline — and a wrong
+    answer when it can. `a$\n` came back as the empty language, so this engine
+    called it different from `a\n`.
+
+    Under SEARCH the reduction already refuses any anchor that is not at a
+    pattern edge, which is why only full-match verdicts were affected. This
+    is the same refusal drawn tighter: a `$` at the end of the pattern is
+    still decided, because nothing can follow it.
+
+    `after_newline` says whether the text following this node, inside the
+    match, can be exactly "\n". A lookaround body gets `True` unconditionally:
+    what follows a `$` inside it is the rest of the subject, which the body
+    does not constrain.
+    """
+    if isinstance(node, Anchor):
+        return after_newline and not node.is_start
+    if isinstance(node, Concat):
+        found = False
+        tail = after_newline
+        for part in reversed(node.parts):
+            found = found or _end_anchor_meets_newline(part, tail)
+            tail = tail or _matches_newline(part)
+        return found
+    if isinstance(node, Alternate):
+        return any(_end_anchor_meets_newline(o, after_newline) for o in node.options)
+    if isinstance(node, Intersect):
+        return any(_end_anchor_meets_newline(p, after_newline) for p in node.parts)
+    if isinstance(node, (Repeat, Poss)):
+        # A further iteration puts the body's own text after the anchor.
+        repeats = node.maximum is None or node.maximum > 1
+        inner = after_newline or (repeats and _matches_newline(node.node))
+        return _end_anchor_meets_newline(node.node, inner)
+    if isinstance(node, (Complement, Atomic)):
+        return _end_anchor_meets_newline(node.node, after_newline)
+    if isinstance(node, Lookaround):
+        return _end_anchor_meets_newline(node.body, True)
+    if isinstance(node, (Empty, CharSet, Assert)):
+        return False
+    _unhandled(node, "_end_anchor_meets_newline")
 
 
 def _refuse_lookaround_operand(parts: list[Node], operator: str) -> None:
@@ -627,15 +708,20 @@ def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> N
     # does not. Searching for "a" finds it in "\na", so a wrapper built from
     # `.` would wrongly forbid the surrounding text from containing newlines.
     any_run = Repeat(any_char(), 0, None)
+    # What a folded `$` still allows after the match. Python's `$` is not
+    # end-of-string: without `re.MULTILINE` it also matches immediately before
+    # a newline that ends the subject, so `re.search("b$", "b\n")` finds it.
+    # Dropping the trailing wildcard outright would forbid that newline and
+    # make this engine call `(a|\n)b` different from `(a|\n)b$`.
+    trailing_newline = Repeat(CharSet(frozenset("\n")), 0, 1)
 
     def wrap(inner: Node, prefix: bool, suffix: bool) -> Node:
         parts: list[Node] = []
         if prefix:
             parts.append(any_run)
         parts.append(inner)
-        if suffix:
-            parts.append(any_run)
-        return parts[0] if len(parts) == 1 else Concat(tuple(parts))
+        parts.append(any_run if suffix else trailing_newline)
+        return Concat(tuple(parts))
 
     if isinstance(node, Alternate):
         # A leading ^ anchors only the first branch and a trailing $ only the
@@ -759,20 +845,35 @@ _MAX_RESOLVED_NODES = 200_000
 
 
 class _ResolveState:
-    """Memo tables for one `_resolve_anchors` call, plus the size budget."""
+    """Memo tables for one `_resolve_anchors` call, plus the size budget.
+
+    Both tables are keyed on `id(node)`, and both therefore have to hold the
+    node itself in the value. Resolution builds nodes as it goes and drops
+    most of them again; CPython hands a freed address straight back to the
+    next allocation, so an entry whose key outlives its node is an entry a
+    *different* node can collide with. That is a wrong answer, not a slow
+    one, and it depends on allocation order, which is why it showed up as a
+    pattern that disagreed with `re` only when another pattern had been
+    resolved first. Keeping a reference makes the address unreusable for as
+    long as the entry can be read.
+    """
 
     __slots__ = ("memo", "sizes")
 
     def __init__(self) -> None:
-        self.memo: dict[tuple[int, bool, bool], tuple[Node, bool]] = {}
-        self.sizes: dict[int, int] = {}
+        self.memo: dict[tuple[int, bool, bool], tuple[Node, tuple[Node, bool]]] = {}
+        self.sizes: dict[int, tuple[Node, int]] = {}
 
 
-def _node_count(node: Node, sizes: dict[int, int]) -> int:
-    """Nodes in `node`, memoised on identity so shared subtrees cost once."""
+def _node_count(node: Node, sizes: dict[int, tuple[Node, int]]) -> int:
+    """Nodes in `node`, memoised on identity so shared subtrees cost once.
+
+    The value keeps `node` alive; see `_ResolveState` for why identity keys
+    are only safe that way.
+    """
     hit = sizes.get(id(node))
     if hit is not None:
-        return hit
+        return hit[1]
     if isinstance(node, (Concat, Intersect)):
         total = 1 + sum(_node_count(p, sizes) for p in node.parts)
     elif isinstance(node, Alternate):
@@ -785,7 +886,7 @@ def _node_count(node: Node, sizes: dict[int, int]) -> int:
         total = 1
     else:
         _unhandled(node, "_node_count")
-    sizes[id(node)] = total
+    sizes[id(node)] = (node, total)
     return total
 
 
@@ -835,11 +936,11 @@ def _resolve_cached(
     key = (id(node), prefix_nullable, suffix_nullable)
     hit = cache.memo.get(key)
     if hit is not None:
-        return hit
+        return hit[1]
     result = _resolve_impl(node, prefix_nullable, suffix_nullable, cache)
     if _node_count(result[0], cache.sizes) > _MAX_RESOLVED_NODES:
         raise Unsupported("resolving anchors expands the pattern past the node budget")
-    cache.memo[key] = result
+    cache.memo[key] = (node, result)
     return result
 
 
@@ -935,11 +1036,49 @@ def _resolve_impl(
             # nothing but still constrains the position, and `re` fails
             # `($)\b` on the empty subject for exactly that reason. The
             # epsilon-restriction keeps those assertions and drops the rest.
-            front = [_epsilon_restrict(p) for p in parts[:start]] if start >= 0 else []
-            back = [_epsilon_restrict(p) for p in parts[end + 1 :]]
+            head_parts = parts[:start] if start >= 0 else []
+            tail_parts = parts[end + 1 :]
             middle = Concat(tuple(parts[start + 1 : end]))
             resolved, _ = _resolve_cached(middle, prefix_nullable, suffix_nullable, cache)
-            return _join([*front, resolved, *back]), True
+
+            def restrict(part: Node, before: bool, after: bool) -> Node:
+                node, _ = _resolve_cached(part, before, after, cache)
+                return _epsilon_restrict(node)
+
+            if not any(_contains_anchor(p) for p in (*head_parts, *tail_parts)):
+                front = [_epsilon_restrict(p) for p in head_parts]
+                back = [_epsilon_restrict(p) for p in tail_parts]
+                return _join([*front, resolved, *back]), True
+
+            # A region collapsed to the empty string can still contain an
+            # anchor of its own, and dropping it is how `a$(^)+` came back
+            # matching "a": `re` needs that `^` at position zero, and the `a`
+            # in front of it makes that impossible. The anchor is nested, so
+            # the scan above never saw it.
+            #
+            # Whether it holds depends on the middle, which is the only text
+            # that can be non-empty here, so the two cases are taken apart.
+            # When the middle matches something, a `^` after it and a `$`
+            # before it are both dead; when the middle is empty too, the whole
+            # concatenation is, and they hold exactly as the outer flags allow.
+            occupied = _join(
+                [
+                    *[restrict(p, prefix_nullable, False) for p in head_parts],
+                    resolved,
+                    *[restrict(p, False, suffix_nullable) for p in tail_parts],
+                ]
+            )
+            vacant = _join(
+                [
+                    *[restrict(p, prefix_nullable, suffix_nullable) for p in head_parts],
+                    _epsilon_restrict(resolved),
+                    *[
+                        restrict(p, prefix_nullable, suffix_nullable)
+                        for p in tail_parts
+                    ],
+                ]
+            )
+            return Alternate((occupied, vacant)), True
         # No anchors at this level; every part may carry its own. A nested
         # `^` holds only when the actual text before the part is empty, a
         # nested `$` only when the text after it is — "can be empty" is not

@@ -72,14 +72,17 @@ print(f"{analyzable}/{len(tasks)}")     # 669/762 = 87.8%
 | NL-RX-Synth / NL-RX-Turk | 100% |
 
 **Pass the corpus's own `semantics`.** It changes the answer, and the default
-flatters this corpus: 740 of the 762 references parse under FULLMATCH (97.1%)
+flatters this corpus: 731 of the 762 references parse under FULLMATCH (95.9%)
 but 669 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The difference
 is the 9.8% — 75 references — that anchor away from the pattern ends: resolved
 exactly under a full match, refused under a search, where the `.*p.*` rewrite
-has nowhere to put them. Four references go the other way, refused under
-FULLMATCH because resolving their anchors exceeds the node budget and accepted
-under SEARCH because the fold means those anchors are never resolved, so the
-two counts differ by 71 rather than 75. (Lookahead and fixed-width lookbehind are decided exactly under
+has nowhere to put them. Thirteen references go the other way, refused under
+FULLMATCH — nine because a `$` sits in front of text that could be the
+subject's final newline, which the search reduction handles exactly and anchor
+resolution refuses, and four because resolving their anchors exceeds the node
+budget — and accepted under SEARCH because the fold means those anchors are
+never resolved, so the two counts differ by 62 rather than 75.
+(Lookahead and fixed-width lookbehind are decided exactly under
 both semantics; what a SEARCH refuses here is a `^` or `$` that no zero-width
 prefix or suffix can carry to the pattern edge.)
 
