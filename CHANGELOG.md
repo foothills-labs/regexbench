@@ -16,15 +16,25 @@ that a 0.x line makes no stability promise.
   per assertion — a pending-set machine for lookaheads (a suffix property,
   so each fired marker defers its check to the end) and a sliding-window
   machine for lookbehinds (a prefix property, certified on the spot) — and
-  the markers are then projected away. Assertions nested inside assertions
-  chain their markers so the outer constraint can certify them too.
+  the markers are then projected away. An assertion nested at the start of
+  another's body fires at the same position, so it chains its marker onto the
+  outer's edge; nested past the start it fires somewhere else and is refused
+  instead.
 
-  The semantics are pinned to Python's `re` by a differential fuzz round over
-  the lookaround closure (300+ generated patterns, zero disagreements with
-  `re.fullmatch`) and by the corpus tasks whose references lean on lookaround.
-  Combined with backreferences a lookaround still leaves the regular
-  languages, and now stays `UNDECIDABLE` for that reason rather than being
-  confused with what this engine can answer.
+  The semantics are pinned to Python's `re` by a differential generator over
+  the lookaround closure — assertions crossed with anchors, boundaries,
+  nesting and quantifiers, under both semantics — and by the corpus tasks
+  whose references lean on lookaround. Combined with backreferences a
+  lookaround still leaves the regular languages, and now stays `UNDECIDABLE`
+  for that reason rather than being confused with what this engine can answer.
+
+  Four shapes are refused rather than answered, because the marker
+  construction cannot represent them: a lookaround nested past the start of
+  another's body, a `\b`/`\B` immediately in front of one (a marker fires
+  before any character is consumed, and a boundary is only crossed while
+  consuming one), a lookaround inside a dk.brics `&`/`~` operand (the context
+  gate cannot carry the preceding text a lookbehind needs), and a
+  variable-width lookbehind, which Python refuses too.
 
 - **An anchored `^`/`$` behind zero-width atoms folds under SEARCH.** The
   anchor folding that handled the literal first and last characters of a
@@ -33,10 +43,37 @@ that a 0.x line makes no stability promise.
   semantics. An anchor that a consuming atom separates from the edge is still
   refused rather than mis-answered.
 
+### Fixed
+
+Found by auditing the feature above against `re` before it shipped. Each was
+a wrong verdict rather than a refusal, and the differential generator that
+now covers them fails on all twelve of its seeds without these.
+
+- **A collapsed region kept its `\b` but dropped its lookaround.**
+  `_epsilon_restrict` had no `Lookaround` case and fell through to the
+  complement branch, deleting the assertion: `(?!a?)a` came back equivalent
+  to `a`, when it matches nothing at all.
+
+- **A lookaround counted as a consuming atom.** `_nullable` read the body's
+  nullability rather than reporting the zero width of the assertion itself,
+  so anchor resolution collapsed `(?=a)^a` and `a$(?!b)` to the empty
+  language although Python matches `"a"` with both.
+
+- **A constraint body assumed it started at the string start.** Both
+  constraint machines enter the body mid-string — a lookahead at each firing,
+  a lookbehind at each window start — but it was built once as "position
+  zero, preceded by a non-word character", so `aa(?<=\ba)` and `aa(?<=^a)`
+  came back equivalent to `aa`. The body is now built once per entry context
+  and entered on the real one, the way `&`/`~` operands already were.
+
+- **Folding both edge anchors away crashed.** `(^)($)` under SEARCH emptied
+  the parts list, built a `Concat(())`, and raised `IndexError` out of the
+  automata layer instead of returning a verdict.
+
 ### Changed
 
-- **Benchmark coverage grows.** 670/762 = 87.9% of Re(gEx|DoS)Eval's SEARCH
-  references parse now, up from 629/762 = 82.5% (FULLMATCH 741/762 = 97.2%).
+- **Benchmark coverage grows.** 669/762 = 87.8% of Re(gEx|DoS)Eval's SEARCH
+  references parse now, up from 629/762 = 82.5% (FULLMATCH 740/762 = 97.1%).
   The remaining lookaround refs are refused either because they combine the
   assertion with a backreference, or because a non-edge anchor makes the
   SEARCH reduction impossible. `equivalence()` reports the new verdicts in

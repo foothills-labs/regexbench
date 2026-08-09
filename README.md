@@ -230,7 +230,7 @@ questions. The plain figure counts undecidable comparisons as failures: how
 much of the corpus was *verified* correct, a lower bound that cannot flatter.
 The `(decided)` figure drops those tasks from the denominator: how much of what
 could be checked was correct, the model alone. On Re(gEx|DoS)Eval the spread is
-the engine's coverage: 87.9% of its references parse under the search
+the engine's coverage: 87.8% of its references parse under the search
 semantics it is scored with, so on the other 12.1% every candidate that is not
 textually identical comes back undecidable and scores zero under the first
 reading. (KB13 used to be the example here, when word boundaries were refused;

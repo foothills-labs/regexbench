@@ -554,8 +554,13 @@ def _constraint_body(
     marker_for: dict[int, str],
     markers: frozenset[str],
     absorb: bool,
-) -> DFA:
+) -> tuple[DFA, dict[tuple[bool, bool], int]]:
     """The body compiled into the DFA a constraint automaton runs on.
+
+    Returned with one start state per entry context, because both constraint
+    machines enter the body mid-string: a lookahead at each firing position, a
+    lookbehind at each window start. Building it once as "start of string,
+    preceded by a non-word character" made `aa(?<=\ba)` equivalent to `aa`.
 
     The body's own markers keep their edges — an assertion inside an assertion
     is as real as one in the pattern — while every other marker self-loops, a
@@ -578,12 +583,61 @@ def _constraint_body(
             # lookbehind observes the window it read so far.
             for other in markers - {symbol}:
                 nfa.link(state, state, _Marker(other))
-    return _subset_construct(
-        nfa, alphabet, markers=markers, tracking=True, previous_is_word=False, at_start=True
-    )
+    contexts = _CONTEXTS if _context_sensitive(a) else ((False, True),)
+    combined = DFA(alphabet=alphabet, start=0)
+    starts: dict[tuple[bool, bool], int] = {}
+    offset = 0
+    for previous_is_word, at_start in contexts:
+        built = _subset_construct(
+            nfa,
+            alphabet,
+            markers=markers,
+            tracking=True,
+            previous_is_word=previous_is_word,
+            at_start=at_start,
+        )
+        for state, row in built.delta.items():
+            combined.delta[offset + state] = {
+                sym: offset + dst for sym, dst in row.items()
+            }
+        combined.accepting.update(offset + state for state in built.accepting)
+        starts[(previous_is_word, at_start)] = offset + built.start
+        offset += len(built.delta)
+    for context in _CONTEXTS:
+        starts.setdefault(context, starts[(False, True)])
+    combined.start = starts[(False, True)]
+    return combined, starts
 
 
-def _lookahead_constraint(pref: DFA, symbol: str, alphabet: tuple[str, ...], positive: bool) -> DFA:
+def _context_sensitive(node: Node) -> bool:
+    """Whether the position a body starts at can change what it matches.
+
+    `\b` and `^` read the character before the body, so a body carrying one
+    means a different language depending on where the assertion fired. Nested
+    lookaround bodies are not descended into: they are separate constraints
+    with their own entry contexts.
+    """
+    if isinstance(node, (Assert, Anchor)):
+        return True
+    if isinstance(node, Lookaround):
+        return False
+    if isinstance(node, (Concat, Intersect)):
+        return any(_context_sensitive(p) for p in node.parts)
+    if isinstance(node, Alternate):
+        return any(_context_sensitive(o) for o in node.options)
+    if isinstance(node, (Repeat, Complement)):
+        return _context_sensitive(node.node)
+    return False
+
+
+def _lookahead_constraint(
+    pref: DFA,
+    starts: dict[tuple[bool, bool], int],
+    symbol: str,
+    alphabet: tuple[str, ...],
+    markers: frozenset[str],
+    positive: bool,
+) -> DFA:
     """A constraint automaton that checks a lookahead at every firing.
 
     A lookaround in a loop fires its marker at each iteration boundary, so the
@@ -593,14 +647,14 @@ def _lookahead_constraint(pref: DFA, symbol: str, alphabet: tuple[str, ...], pos
     and the end decides: every check satisfied (positive) or every one failed
     (negative). An annotation with no firing is vacuously fine.
     """
-    start = frozenset()
-    index: dict[frozenset[int], int] = {start: 0}
+    start = (frozenset(), False, True)
+    index: dict[tuple[frozenset[int], bool, bool], int] = {start: 0}
     dfa = DFA(alphabet=alphabet, start=0)
-    queue: deque[frozenset[int]] = deque([start])
+    queue: deque[tuple[frozenset[int], bool, bool]] = deque([start])
 
     while queue:
-        pending = queue.popleft()
-        sid = index[pending]
+        pending, previous_is_word, at_start = queue.popleft()
+        sid = index[(pending, previous_is_word, at_start)]
         dfa.delta[sid] = {}
 
         if positive:
@@ -612,21 +666,40 @@ def _lookahead_constraint(pref: DFA, symbol: str, alphabet: tuple[str, ...], pos
 
         for other in alphabet:
             if other == symbol:
-                nxt_pending = pending | {pref.start}
+                # Fires here, so the body starts here: enter the copy built
+                # for the context this position actually has.
+                nxt = (pending | {starts[(previous_is_word, at_start)]}, previous_is_word, at_start)
+            elif other in markers:
+                # Another assertion's marker: zero-width, so the context the
+                # next body would start in is unchanged.
+                nxt = (
+                    frozenset(pref.delta[state][other] for state in pending),
+                    previous_is_word,
+                    at_start,
+                )
             else:
-                nxt_pending = frozenset(pref.delta[state][other] for state in pending)
-            if nxt_pending not in index:
+                nxt = (
+                    frozenset(pref.delta[state][other] for state in pending),
+                    is_word_symbol(other),
+                    False,
+                )
+            if nxt not in index:
                 if len(index) > _MAX_STATES:
                     raise Unsupported("pattern expands to too many DFA states")
-                index[nxt_pending] = len(index)
-                queue.append(nxt_pending)
-            dfa.delta[sid][other] = index[nxt_pending]
+                index[nxt] = len(index)
+                queue.append(nxt)
+            dfa.delta[sid][other] = index[nxt]
 
     return dfa
 
 
 def _lookbehind_constraint(
-    window: DFA, symbol: str, alphabet: tuple[str, ...], positive: bool
+    window: DFA,
+    starts: dict[tuple[bool, bool], int],
+    symbol: str,
+    alphabet: tuple[str, ...],
+    markers: frozenset[str],
+    positive: bool,
 ) -> DFA:
     """A constraint automaton that checks a lookbehind at every firing.
 
@@ -636,7 +709,9 @@ def _lookbehind_constraint(
     marker is certified on the spot by the window it sees. One failed firing
     poisons the annotation; none at all leaves it fine.
     """
-    start = (frozenset({window.start}), False)
+    # The window open at position zero begins there, so it enters the copy
+    # built for "start of string".
+    start = (frozenset({starts[(False, True)]}), False)
     index: dict[tuple[frozenset[int], bool], int] = {start: 0}
     dfa = DFA(alphabet=alphabet, start=0)
     queue: deque[tuple[frozenset[int], bool]] = deque([start])
@@ -653,9 +728,17 @@ def _lookbehind_constraint(
                 complete = not states.isdisjoint(window.accepting)
                 poison = complete if not positive else not complete
                 nxt = (states, poisoned or poison)
+            elif other in markers:
+                # Zero-width: no new window opens and the open ones do not
+                # advance past a character, so only the marker edge applies.
+                advanced = frozenset(window.delta[state][other] for state in states)
+                nxt = (advanced, poisoned)
             else:
                 advanced = frozenset(window.delta[state][other] for state in states)
-                nxt = (advanced | {window.start}, poisoned)
+                # The window opening after this character begins in the
+                # context this character leaves behind.
+                fresh = starts[(is_word_symbol(other), False)]
+                nxt = (advanced | {fresh}, poisoned)
             if nxt not in index:
                 if len(index) > _MAX_STATES:
                     raise Unsupported("pattern expands to too many DFA states")
@@ -770,15 +853,19 @@ def build_dfa(
     )
     for lookaround, symbol in zip(lookarounds, marker_symbols, strict=True):
         if lookaround.lookahead:
-            pref = _constraint_body(
+            pref, starts = _constraint_body(
                 lookaround.body, symbol, full_alphabet, marker_for, markers, absorb=True
             )
-            constraint = _lookahead_constraint(pref, symbol, full_alphabet, lookaround.positive)
+            constraint = _lookahead_constraint(
+                pref, starts, symbol, full_alphabet, markers, lookaround.positive
+            )
         else:
-            window = _constraint_body(
+            window, starts = _constraint_body(
                 lookaround.body, symbol, full_alphabet, marker_for, markers, absorb=False
             )
-            constraint = _lookbehind_constraint(window, symbol, full_alphabet, lookaround.positive)
+            constraint = _lookbehind_constraint(
+                window, starts, symbol, full_alphabet, markers, lookaround.positive
+            )
         combined = _intersect(combined, constraint)
     return _project(combined, alphabet, markers)
 

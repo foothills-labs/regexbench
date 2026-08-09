@@ -62,18 +62,18 @@ tasks = load_regexeval("RegexEval.json")
 analyzable = sum(
     is_regular(t.reference, semantics=t.semantics, dialect=t.dialect) for t in tasks
 )
-print(f"{analyzable}/{len(tasks)}")     # 670/762 = 87.9%
+print(f"{analyzable}/{len(tasks)}")     # 669/762 = 87.8%
 ```
 
 | Corpus | References this engine can parse |
 | --- | --- |
-| Re(gEx|DoS)Eval | 87.9% |
+| Re(gEx|DoS)Eval | 87.8% |
 | KB13 | 100% |
 | NL-RX-Synth / NL-RX-Turk | 100% |
 
 **Pass the corpus's own `semantics`.** It changes the answer, and the default
-flatters this corpus: 741 of the 762 references parse under FULLMATCH (97.2%)
-but 670 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The difference
+flatters this corpus: 740 of the 762 references parse under FULLMATCH (97.1%)
+but 669 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The difference
 is the 9.3% that anchor away from the pattern ends — resolved exactly under a
 full match, refused under a search, where the `.*p.*` rewrite has nowhere to
 put them. (Lookahead and fixed-width lookbehind are decided exactly under
@@ -205,7 +205,7 @@ number cannot answer both:
   what we could check, how much was correct" — the model on its own, blind to
   engine coverage.
 
-Re(gEx|DoS)Eval makes the spread concrete: 87.9% of its references parse under
+Re(gEx|DoS)Eval makes the spread concrete: 87.8% of its references parse under
 the search semantics it is scored with, so on the other 12.1% every candidate
 that is not textually identical comes back undecidable and scores zero under
 the first reading. Watch both, and treat a gap between them as a statement

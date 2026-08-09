@@ -301,6 +301,15 @@ def parse(
     if parser.pos != len(parser.src):
         raise Unsupported(f"unexpected {parser.peek()!r} at position {parser.pos}")
     node = _finalize_sticky(node, at_end=True)
+    if _assert_meets_lookaround(node):
+        # The marked machine crosses an assertion only while consuming a real
+        # character, because that is when the boundary either side of it is
+        # known — but a marker fires before any character is consumed, so a
+        # `\b` sitting immediately in front of one can never be crossed and
+        # the branch silently matches nothing. Refuse rather than answer.
+        raise Unsupported(
+            "a word boundary immediately before a lookaround is not supported"
+        )
     if semantics is Semantics.SEARCH:
         # The search reduction widens the pattern with `.*`, which would
         # move any nested anchor away from the position it constrains.
@@ -338,6 +347,136 @@ def uses_assertions(node: Node) -> bool:
 def any_char() -> CharSet:
     """A set matching every character, including the OTHER sentinel."""
     return CharSet(frozenset(), negated=True)
+
+
+def _right_run_has_assert(node: Node) -> bool:
+    """Whether a match of `node` can end on an unresolved `\b`/`\B`."""
+    if isinstance(node, Assert):
+        return True
+    if isinstance(node, Concat):
+        for part in reversed(node.parts):
+            if _right_run_has_assert(part):
+                return True
+            if not _zero_width(part):
+                return False
+        return False
+    if isinstance(node, Alternate):
+        return any(_right_run_has_assert(o) for o in node.options)
+    if isinstance(node, Repeat):
+        return node.maximum != 0 and _right_run_has_assert(node.node)
+    return False
+
+
+def _left_run_has_lookaround(node: Node) -> bool:
+    """Whether a match of `node` can begin by firing a lookaround marker."""
+    if isinstance(node, Lookaround):
+        return True
+    if isinstance(node, Concat):
+        for part in node.parts:
+            if _left_run_has_lookaround(part):
+                return True
+            if not _zero_width(part):
+                return False
+        return False
+    if isinstance(node, Alternate):
+        return any(_left_run_has_lookaround(o) for o in node.options)
+    if isinstance(node, Repeat):
+        return node.maximum != 0 and _left_run_has_lookaround(node.node)
+    return False
+
+
+def _assert_meets_lookaround(node: Node) -> bool:
+    """Whether a `\b` can sit immediately in front of a lookaround marker."""
+    if isinstance(node, Concat):
+        parts = node.parts
+        for i, part in enumerate(parts):
+            if not _right_run_has_assert(part):
+                continue
+            for later in parts[i + 1 :]:
+                if _left_run_has_lookaround(later):
+                    return True
+                if not _zero_width(later):
+                    break
+        return any(_assert_meets_lookaround(p) for p in parts)
+    if isinstance(node, Alternate):
+        return any(_assert_meets_lookaround(o) for o in node.options)
+    if isinstance(node, Repeat):
+        body = node.node
+        # A second iteration puts the body's tail in front of its own head.
+        if (node.maximum is None or node.maximum > 1) and _right_run_has_assert(
+            body
+        ) and _left_run_has_lookaround(body):
+            return True
+        return _assert_meets_lookaround(body)
+    if isinstance(node, Lookaround):
+        return _assert_meets_lookaround(node.body)
+    if isinstance(node, Intersect):
+        return any(_assert_meets_lookaround(p) for p in node.parts)
+    if isinstance(node, Complement):
+        return _assert_meets_lookaround(node.node)
+    return False
+
+
+def _refuse_lookaround_operand(parts: list[Node], operator: str) -> None:
+    """Refuse a lookaround inside a `&` or `~` operand.
+
+    The operand is determinized on its own and entered through a context
+    gate carrying only the word-ness of the preceding character and whether
+    the position is the string start. A lookbehind needs the preceding *text*,
+    which that gate cannot express, so `a(((?<=a)b)&(b))` came out as the
+    empty language instead of matching "ab".
+    """
+    if any(_contains_lookaround(part) for part in parts):
+        raise Unsupported(f"lookaround inside a {operator!r} operand is not supported")
+
+
+def _contains_lookaround(node: Node) -> bool:
+    if isinstance(node, Lookaround):
+        return True
+    if isinstance(node, (Concat, Intersect)):
+        return any(_contains_lookaround(p) for p in node.parts)
+    if isinstance(node, Alternate):
+        return any(_contains_lookaround(o) for o in node.options)
+    if isinstance(node, (Repeat, Complement)):
+        return _contains_lookaround(node.node)
+    return False
+
+
+def _nested_fires_at_start(node: Node) -> bool:
+    """Whether every lookaround inside `node` fires at `node`'s own position.
+
+    The marked machine records an assertion as a single zero-width edge, and
+    chains the markers of assertions nested in its body onto that same edge —
+    which is only true when the nested one fires where the outer one does.
+    `(?=(?=^a))a` does; `(?=a(?=b))ab` does not, because the inner assertion
+    sits one character into the body. Rather than certify the inner
+    constraint at the wrong position, the offset case is refused.
+    """
+    if isinstance(node, Lookaround):
+        return True
+    if isinstance(node, Concat):
+        seen_consuming = False
+        for part in node.parts:
+            if seen_consuming and _contains_lookaround(part):
+                return False
+            if not _nested_fires_at_start(part):
+                return False
+            if not _zero_width(part):
+                seen_consuming = True
+        return True
+    if isinstance(node, Alternate):
+        return all(_nested_fires_at_start(option) for option in node.options)
+    if isinstance(node, Repeat):
+        # A second iteration starts past the first, so only a body that
+        # cannot repeat past its own start keeps the firing position.
+        if _contains_lookaround(node.node) and not (
+            node.maximum == 1 or _zero_width(node.node)
+        ):
+            return False
+        return _nested_fires_at_start(node.node)
+    if isinstance(node, (Intersect, Complement)):
+        return not _contains_lookaround(node)
+    return True
 
 
 def _zero_width(node: Node) -> bool:
@@ -401,7 +540,10 @@ def _fold_edge_anchors(
             if not _zero_width(part):
                 break
             index -= 1
-        node = parts[0] if len(parts) == 1 else Concat(tuple(parts))
+        # `_join`, not `Concat`: folding both anchors out of `(^)($)` empties
+        # the list, and a `Concat(())` reaches `_emit`, which indexes
+        # `parts[-1]` and raises IndexError instead of returning a verdict.
+        node = _join(parts)
     return node, (anchored_start, anchored_end)
 
 
@@ -454,9 +596,12 @@ def _nullable(node: Node) -> bool:
     if isinstance(node, Intersect):
         return all(_nullable(part) for part in node.parts)
     if isinstance(node, Lookaround):
-        # The assertion consumes nothing, and it holds on the empty string
-        # exactly when its body can match the empty string.
-        return _nullable(node.body)
+        # Zero-width, so it never contributes characters — nullable in the
+        # width sense whatever its body does, exactly like `\b`. Whether the
+        # assertion *holds* is a property of the position, decided by the
+        # automaton; reading the body's nullability here made `(?=a)` look
+        # like a consuming atom and collapsed `(?=a)^a` to the empty language.
+        return True
     return not _nullable(node.node)  # Complement
 
 
@@ -804,7 +949,10 @@ def _epsilon_restrict(node: Node) -> Node:
     collapses to the empty string (it was already checked to be nullable) or
     to the empty language.
     """
-    if isinstance(node, Assert):
+    if isinstance(node, Assert) or isinstance(node, Lookaround):
+        # Both consume nothing and both still constrain the position, so a
+        # region forced to the empty string keeps them. Dropping the
+        # lookaround made `(?!a?)a` equivalent to `a`, when it matches nothing.
         return node
     if isinstance(node, Empty) or isinstance(node, Anchor):
         return Empty()
@@ -971,7 +1119,10 @@ class _Parser:
         while self.brics and self.peek() == "&":
             self.eat()
             parts.append(self.parse_concat())
-        return parts[0] if len(parts) == 1 else Intersect(tuple(parts))
+        if len(parts) == 1:
+            return parts[0]
+        _refuse_lookaround_operand(parts, "&")
+        return Intersect(tuple(parts))
 
     def parse_concat(self) -> Node:
         parts: list[Node] = []
@@ -1058,7 +1209,9 @@ class _Parser:
         """dk.brics `~`, which binds tighter than concatenation."""
         if self.brics and self.peek() == "~":
             self.eat()
-            return Complement(self.parse_complement())
+            inner = self.parse_complement()
+            _refuse_lookaround_operand([inner], "~")
+            return Complement(inner)
         return self.parse_atom()
 
     def parse_atom(self) -> Node:
@@ -1132,6 +1285,11 @@ class _Parser:
                 self.eat()
                 if opened in ("<=", "<!") and _fixed_width(body) is None:
                     raise Unsupported("look-behind requires fixed-width pattern")
+                if not _nested_fires_at_start(body):
+                    raise Unsupported(
+                        "a lookaround nested past the start of another's body "
+                        "is not supported"
+                    )
                 return Lookaround(kind=opened, body=body)
             elif rest.startswith("?>"):
                 # Atomicity changes the language only when the content can

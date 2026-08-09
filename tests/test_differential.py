@@ -458,3 +458,62 @@ def test_nested_anchor_verdicts_agree_with_re(seed: int, semantics: Semantics) -
     # most of what this generator emits is UNSUPPORTED by design.
     floor = 8 if semantics is Semantics.SEARCH else 40
     assert checked > floor, "generator produced too few analyzable pairs to be meaningful"
+
+
+# --------------------------------------------------------------------------
+# Lookaround.
+#
+# The generator below is the one that was missing when lookaround landed. The
+# existing lookaround coverage was a table of curated pairs plus the BRICS
+# translation above, which only ever emits `(?=(?:X)$)` and `(?!(?:X)$)` —
+# always `$`-anchored, always leading, never nested, never a lookbehind. Six
+# families of wrong verdict lived in the shapes it could not produce.
+
+LOOKAROUND_ATOMS = [
+    "a", "b", "[ab]", "a?",
+    "(?=a)", "(?!a)", "(?=ab)", "(?!ab)",
+    "(?<=a)", "(?<!a)", "(?<=ab)", "(?<!ab)",
+    "(?=a)b", "a(?=b)", "(?<=a)b", "(?<!a)b",
+    # Assertions meeting anchors and boundaries: `(?=a)^a` and `a$(?!b)` both
+    # came back with the wrong verdict because a zero-width assertion was
+    # read as a consuming atom.
+    "^", "$", r"\b", r"\B", "(?=.)", "(?!.)",
+    # Nullable and empty bodies: `(?!a?)a` matches nothing, and the assertion
+    # must survive a region being forced to the empty string.
+    "(?!a?)", "(?=a?)", "(?!)",
+    # Nested at the body start, which fires at the same position and is
+    # decided; nesting past the start is refused, not answered.
+    "(?=(?=a))", "(?=(?!b))",
+]
+LOOKAROUNDS = generator(LOOKAROUND_ATOMS)
+LOOKAROUND_CORPUS = corpus("ab", longest=4)
+
+
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(6))
+def test_lookaround_verdicts_agree_with_re(seed: int, semantics: Semantics) -> None:
+    """`(?!a?)a` matches nothing and `(?=a)^a` matches "a" — neither is `a`."""
+    rng = random.Random(seed)
+    method = method_for(semantics)
+    checked = 0
+
+    for _ in range(150):
+        left, right = LOOKAROUNDS(rng), LOOKAROUNDS(rng)
+        try:
+            compiled_left, compiled_right = re.compile(left), re.compile(right)
+        except re.error:
+            continue
+
+        result = equivalent(left, right, semantics=semantics)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+        cross_check(
+            result,
+            matcher(compiled_left, method),
+            matcher(compiled_right, method),
+            LOOKAROUND_CORPUS,
+            f"{method} of {left!r} and {right!r}",
+        )
+
+    assert checked > 30, "generator produced too few analyzable pairs to be meaningful"
