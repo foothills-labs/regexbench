@@ -197,6 +197,33 @@ easy half reports a number nobody can interpret.
 See [docs/benchmarks.md](docs/benchmarks.md) for where to download each one and
 what coverage to expect.
 
+## Checking the engine itself
+
+Everything above compares two *patterns*. `crosscheck` compares one pattern's
+automaton to `re`, string by string, which is the sharper question — and the
+one that finds bugs in this package:
+
+```python
+from regexbench import crosscheck
+
+crosscheck(r"(ab)+").agreement       # <Agreement.AGREES>
+crosscheck(r"(a)\1").agreement       # <Agreement.UNCHECKED> — a stated refusal
+crosscheck(r"(a)\1").reason          # 'backreferences make the language non-regular'
+```
+
+A *verdict* about a pair only goes wrong when the two patterns go wrong in
+different ways, so a mistake this engine makes uniformly cancels out of it.
+Membership has no such cancellation. Point it at a file of patterns:
+
+```bash
+regexbench crosscheck uniq-regexes-8.json --registry pypi
+```
+
+That is how the last five wrong-answer bugs here were found, on corpora of
+regexes people actually wrote rather than on anything curated. If you are
+deciding whether to trust a verdict from this package, run it on your own
+patterns.
+
 ## Scoring a whole model
 
 ```python
@@ -230,8 +257,8 @@ questions. The plain figure counts undecidable comparisons as failures: how
 much of the corpus was *verified* correct, a lower bound that cannot flatter.
 The `(decided)` figure drops those tasks from the denominator: how much of what
 could be checked was correct, the model alone. On Re(gEx|DoS)Eval the spread is
-the engine's coverage: 87.8% of its references parse under the search
-semantics it is scored with, so on the other 12.1% every candidate that is not
+the engine's coverage: 86.6% of its references parse under the search
+semantics it is scored with, so on the other 13.4% every candidate that is not
 textually identical comes back undecidable and scores zero under the first
 reading. (KB13 used to be the example here, when word boundaries were refused;
 all three dk.brics corpora parse in full now.)
@@ -321,7 +348,8 @@ Known limits, in the order they cost you coverage:
 | Construct | Status |
 | --- | --- |
 | `^` / `$` away from the pattern ends, under `SEARCH` | `UNSUPPORTED` — the `.*p.*` rewrite has nowhere to put them. 9.8% of Re(gEx|DoS)Eval; resolved exactly under `FULLMATCH` |
-| Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata. Refused for a variable-width lookbehind, a `\b` immediately in front of one, or one inside a dk.brics `&`/`~` operand. Nesting is decided only inside a positive lookahead, and only at the body's start |
+| `$` inside a lookaround body, under `SEARCH` | `UNSUPPORTED` — the subject can always carry one more newline, which the fold cannot express. 1.2% of Re(gEx|DoS)Eval |
+| Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata. Refused for a variable-width lookbehind, a `\b` immediately in front of one or at the right edge of a lookbehind body, or one inside a dk.brics `&`/`~` operand. Nesting is decided only inside a positive lookahead, at the body's start, on every path |
 | `$` before text that could be the subject's final newline, under `FULLMATCH` | `UNSUPPORTED` — Python's `$` matches there too, and folding the anchor cannot say so. 1.2% of Re(gEx|DoS)Eval; exact under `SEARCH` |
 | Backreferences | `UNDECIDABLE` — no engine can answer this |
 | `[\D0-9]` — a negated shorthand mixed with other members | `UNSUPPORTED` — not one character set |

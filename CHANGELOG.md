@@ -73,14 +73,17 @@ that a 0.x line makes no stability promise.
   backwards, asking that neither conjunct hold rather than that the
   conjunction fail.
 
-  Five shapes are refused rather than answered, because the marker
+  Seven shapes are refused rather than answered, because the marker
   construction cannot represent them: a lookaround nested past the start of
-  another's body, one nested inside a lookbehind or a negative assertion, a
-  `\b`/`\B` immediately in front of one (a marker fires before any character
-  is consumed, and a boundary is only crossed while consuming one), a
+  another's body, one nested inside a lookbehind or a negative assertion, one
+  nested where the body can skip it, a `\b`/`\B` immediately in front of one
+  (a marker fires before any character is consumed, and a boundary is only
+  crossed while consuming one), a `\b`/`\B` at the right edge of a lookbehind
+  body (the window ends there and cannot see the character after it), a
   lookaround inside a dk.brics `&`/`~` operand (the context gate cannot carry
   the preceding text a lookbehind needs), and a variable-width lookbehind,
-  which Python refuses too.
+  which Python refuses too. A `$` inside a body is refused under search for a
+  separate reason, listed below.
 
 - **An anchored `^`/`$` behind zero-width atoms folds under SEARCH.** The
   anchor folding that handled the literal first and last characters of a
@@ -118,11 +121,32 @@ now covers them fails on all twelve of its seeds without these.
 
 ### Fixed
 
-Found by running three real-world corpora through the engine — 43,895 regexes
+Found by fuzzing the lookaround construction against `re`.
+
+- **A nullable atom between a `\b` and a lookaround marker was read as a
+  separator.** A marker fires before any character is consumed, so an atom
+  that *can* be empty does not push it past the boundary: `\b(x?)(?=b)b` is
+  exactly as unrepresentable as `\b(?=b)b`, and was decided anyway. The
+  boundary-resolution helpers now ask whether an atom is nullable rather than
+  whether it is zero-width, which also stops `(a|)` crashing one of them.
+
+- **The sentinel alphabet could not tell `\n` from other whitespace.**
+  Python's `.` excludes exactly the newline and nothing else, and the search
+  reduction of `$` appends an optional `[\n]` — both need a newline symbol in
+  the alphabet to mean anything, or there is nothing for them to match on.
+  Without it `a.` came back equivalent to `ab|a[^b]`.
+
+- **dk.brics' `.` matches the newline too.** Its patterns are over plain
+  strings, with no notion of a line, so it parses as any-character there
+  rather than as Python's "anything but a newline".
+
+### Fixed
+
+Found by running three real-world corpora through the engine — 43,896 regexes
 used by PyPI packages, 495,135 from Stack Overflow posts and 3,838 from
 RegExLib, all from the LinguaFranca artifact — with every pattern's automaton
-cross-checked against `re` string by string. Four wrong-answer bugs, none of
-which the suite could reach at the time.
+crosschecked against `re` string by string, under both semantics. Six
+wrong-answer bugs, none of which the suite could reach at the time.
 
 - **An identity-keyed memo could read another node's answer.** Anchor
   resolution memoises on `id(node)` but kept no reference to the node, and
@@ -152,6 +176,26 @@ which the suite could reach at the time.
   move from decided to refused under FULLMATCH as a result; the SEARCH count
   the corpus is scored on is unchanged.
 
+- **`$` inside a lookaround body was folded as end-of-string under search.**
+  The same rule as the entry above, in the one path that fix did not cover.
+  `_contains_anchor` deliberately does not look inside a lookaround body,
+  because an anchor there is meaningful rather than misplaced — `(?=^a)` says
+  the match begins the subject. But a `$` there is folded as plain
+  end-of-string, and under a search the subject can always carry one more
+  newline, so `a(?=b$)` missed "ab\n" and `(?!^0*$)\d{1,5}` accepted "0\n"
+  that `re` rejects. Refused now, the way the full-match branch already
+  refused it. Nine of Re(gEx|DoS)Eval's references move to UNSUPPORTED.
+
+- **A word boundary at the right edge of a lookbehind body was answered.** A
+  lookbehind is certified by a sliding window over the text already read, and
+  the window ends where the assertion fires — so a `\b` on that edge needs the
+  character *after* the window, the one thing the window cannot carry.
+  `(?<=\b)a` was certified as "preceded by a word character, so no boundary"
+  and rejected "a"; `(?<=\d\b)(?!,)` found a match in "0z" where `re` finds
+  none. A boundary anywhere else in the body is still decided: at the left
+  edge the entry context carries the preceding character, and in the middle
+  both sides are inside the window.
+
 - **Chained assertion markers fired as alternatives, not in series.** A
   lookaround nested at the start of another's body has its marker chained onto
   the outer's edge, and each was linked from the same state to the same state
@@ -180,6 +224,34 @@ which the suite could reach at the time.
   The tail is now resolved in both cases the middle allows — occupied, where
   such an anchor cannot hold, and empty, where it holds exactly as the outer
   context allows — so `a?$(^)+` still matches the empty string.
+
+### Added
+
+- **`crosscheck` — this engine's automaton against `re`, string by string.**
+  Everything else in this package compares two *patterns*, and a verdict about
+  a pair only goes wrong when the two patterns go wrong in different ways, so
+  a mistake the engine makes uniformly cancels out of it. Membership has no
+  such cancellation, and every bug in the Fixed sections below was found that
+  way.
+
+  `crosscheck(pattern)` returns AGREES, DISAGREES with a witness, or UNCHECKED
+  with the refusal that stopped it. `regexbench crosscheck FILE` runs it over a
+  corpus and exits non-zero on a disagreement, with a breakdown of why the rest
+  went unchecked.
+
+- **`load_linguafranca` — half a million regexes people actually wrote.**
+  The three corpora from the LinguaFranca FSE'19 artifact: patterns extracted
+  from 193,524 projects in eight languages, from Stack Overflow posts, and from
+  regexlib.com. They carry no prompts and no references, so they are not
+  benchmarks and the loader returns patterns rather than tasks; what they are
+  for is checking the engine on syntax nobody curated. `registry="pypi"` keeps
+  the ones a Python result can honestly be stated over.
+
+- **The suite runs real-world patterns on every run.** 355 of them, checked in
+  under `tests/data/` with attribution — the one place a third-party corpus is
+  redistributed here, and a test fixture rather than a benchmark. The first ten
+  are the patterns that exposed the six bugs below. `REGEXBENCH_CORPUS` points
+  the same test at a downloaded corpus when you want the whole thing.
 
 ### Changed
 
@@ -215,6 +287,10 @@ which the suite could reach at the time.
 
 - **Benchmark coverage grows.** 669/762 = 87.8% of Re(gEx|DoS)Eval's SEARCH
   references parse now, up from 629/762 = 82.5% (FULLMATCH 740/762 = 97.1%).
+
+  Since then the `$` refusals above have taken SEARCH to 660/762 = 86.6% and
+  FULLMATCH to 731/762 = 95.9%. Those references were being answered, and
+  answered wrongly on any subject ending in a newline.
   Three of the newly parseable references carry a ReDoS shape the structural
   pass can now see, so `vulnerable@1` on that corpus moves from 12.7% to
   13.1% — a property of the dataset that was previously invisible, not a

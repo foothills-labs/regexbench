@@ -15,6 +15,7 @@ import pytest
 from regexbench import Dialect, Semantics, Verdict, check, equivalent
 from regexbench.datasets import (
     load_deep_regex,
+    load_linguafranca,
     load_regexeval,
     load_tasks,
 )
@@ -265,3 +266,94 @@ class TestCustomTasks:
         path.write_text('{"positives": ["a"]}\n{oops\n', encoding="utf-8")
         with pytest.raises(ValueError, match="line 2"):
             load_tasks(path)
+
+
+# Verbatim records from the two LinguaFranca shapes.
+PRODUCTION_RECORDS = [
+    {
+        "pattern": "\\d+",
+        "supportedLangs": [],
+        "type": "Regex",
+        "useCount_IStype_to_nPosts": {},
+        "useCount_registry_to_nModules": {"pypi": 3, "npm": 12},
+    },
+    {
+        "pattern": "^[a-z]+$",
+        "supportedLangs": [],
+        "type": "Regex",
+        "useCount_IStype_to_nPosts": {},
+        "useCount_registry_to_nModules": {"npm": 1},
+    },
+    # The extractor emitted a boolean for a handful of records.
+    {"pattern": False, "type": "Regex", "useCount_registry_to_nModules": {"cpan": 7}},
+    # A duplicate of the first, which the corpus does contain across shards.
+    {"pattern": "\\d+", "type": "Regex", "useCount_registry_to_nModules": {"pypi": 1}},
+]
+
+INTERNET_RECORDS = [
+    {
+        "patterns": ["[Start]", "[End]"],
+        "type": "StackOverflowRegexSource",
+        "uri": "https://www.stackoverflow.com/questions/1237",
+        "uriAliases": [],
+    },
+    {"patterns": ["^\\d{4}$"], "type": "RegExLibRegexSource", "uri": "http://regexlib.com/1"},
+]
+
+
+@pytest.fixture
+def production_file(tmp_path):
+    path = tmp_path / "uniq-regexes-8.json"
+    path.write_text(
+        "\n".join(json.dumps(r) for r in PRODUCTION_RECORDS) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+@pytest.fixture
+def internet_file(tmp_path):
+    path = tmp_path / "internetSources.json"
+    path.write_text(
+        "\n".join(json.dumps(r) for r in INTERNET_RECORDS) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_production_records_load_deduplicated(production_file):
+    assert load_linguafranca(production_file) == [r"\d+", "^[a-z]+$"]
+
+
+def test_a_registry_filter_keeps_only_that_ecosystem(production_file):
+    """Stating a result in Python terms means counting Python's regexes.
+
+    The other seven languages' patterns are written against engines with
+    syntax `re` does not have, so a refusal rate over the whole corpus would
+    be measuring the dialect gap rather than this engine.
+    """
+    assert load_linguafranca(production_file, registry="pypi") == [r"\d+"]
+    assert load_linguafranca(production_file, registry="npm") == [r"\d+", "^[a-z]+$"]
+    assert load_linguafranca(production_file, registry="rubygems") == []
+
+
+def test_a_post_quoting_several_patterns_yields_all_of_them(internet_file):
+    assert load_linguafranca(internet_file) == ["[Start]", "[End]", r"^\d{4}$"]
+
+
+def test_the_internet_shape_has_no_registry_to_filter_on(internet_file):
+    assert load_linguafranca(internet_file, registry="pypi") == []
+
+
+def test_limit_stops_early(production_file):
+    assert load_linguafranca(production_file, limit=1) == [r"\d+"]
+
+
+def test_a_missing_corpus_is_reported_as_such(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_linguafranca(tmp_path / "nope.json")
+
+
+def test_a_corpus_that_is_not_json_lines_is_rejected(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text('{"pattern": "a"}\nnot json\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="bad.json:2"):
+        load_linguafranca(path)

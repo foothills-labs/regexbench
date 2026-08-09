@@ -178,3 +178,72 @@ def test_limit_narrows_a_full_predictions_file(tmp_path, capsys):
     )
     assert exit_code == 0
     assert "1 tasks, 1 answered" in capsys.readouterr().out
+
+
+class TestCrosscheck:
+    """`regexbench crosscheck` — the engine against `re`, over a file."""
+
+    def _corpus(self, tmp_path, patterns, name="corpus.json"):
+        path = tmp_path / name
+        path.write_text(
+            "\n".join(json.dumps({"pattern": p}) for p in patterns) + "\n",
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def test_a_clean_corpus_exits_zero_and_says_what_it_compared(
+        self, tmp_path, capsys
+    ):
+        path = self._corpus(tmp_path, [r"(ab)+", r"[0-9]{2}", r"a|b"])
+        assert main(["crosscheck", path]) == 0
+        out = capsys.readouterr().out
+        assert "DISAGREEMENTS     : 0" in out
+        assert "crosschecked      : 3" in out
+
+    def test_refusals_are_counted_and_explained_not_treated_as_failures(
+        self, tmp_path, capsys
+    ):
+        """UNCHECKED is a stated answer. It must not exit non-zero."""
+        path = self._corpus(tmp_path, [r"(a)\1", r"ab"])
+        assert main(["crosscheck", path]) == 0
+        out = capsys.readouterr().out
+        assert "unchecked         : 1" in out
+        assert "backreferences" in out
+
+    def test_a_plain_text_file_works_too(self, tmp_path, capsys):
+        """Not everyone's patterns arrive as a LinguaFranca corpus."""
+        path = tmp_path / "patterns.txt"
+        path.write_text("a+\n[0-9]\n\n", encoding="utf-8")
+        assert main(["crosscheck", str(path)]) == 0
+        assert "crosschecked      : 2" in capsys.readouterr().out
+
+    def test_a_registry_filter_selects_one_ecosystem(self, tmp_path, capsys):
+        path = tmp_path / "prod.json"
+        path.write_text(
+            json.dumps({"pattern": "a+", "useCount_registry_to_nModules": {"pypi": 1}})
+            + "\n"
+            + json.dumps({"pattern": "b+", "useCount_registry_to_nModules": {"npm": 1}})
+            + "\n",
+            encoding="utf-8",
+        )
+        assert main(["crosscheck", str(path), "--registry", "pypi"]) == 0
+        assert "patterns          : 1" in capsys.readouterr().out
+
+    def test_search_and_limit_are_honoured(self, tmp_path, capsys):
+        path = self._corpus(tmp_path, [r"a+", r"b+", r"c+"])
+        assert main(["crosscheck", path, "--search", "--limit", "2"]) == 0
+        assert "patterns          : 2" in capsys.readouterr().out
+
+    def test_a_disagreement_exits_one(self, tmp_path, capsys, monkeypatch):
+        """The only outcome that fails, faked because the engine is not wrong."""
+        from regexbench.types import Agreement, CrosscheckResult
+
+        monkeypatch.setattr(
+            "regexbench.cli.crosscheck",
+            lambda pattern, **kw: CrosscheckResult(
+                Agreement.DISAGREES, witness="a", reason="automaton says otherwise"
+            ),
+        )
+        path = self._corpus(tmp_path, [r"a+"])
+        assert main(["crosscheck", path]) == 1
+        assert "DISAGREEMENTS     : 1" in capsys.readouterr().out

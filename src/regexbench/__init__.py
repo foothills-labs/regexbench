@@ -28,13 +28,16 @@ number produced here can be put next to a published one.
 """
 
 from ._parse import NonRegular, Unsupported
+from .agreement import crosscheck
 from .correctness import check, evaluate
 from .equivalence import equivalent, is_regular
 from .execute import MatchTimeout, match_many, safe_fullmatch, safe_search
 from .harness import CandidateResult, SuiteReport, TaskResult, pass_at_k, run
 from .safety import attack_strings, screen
 from .types import (
+    Agreement,
     CorrectnessResult,
+    CrosscheckResult,
     Dialect,
     EquivalenceResult,
     Report,
@@ -48,8 +51,10 @@ from .types import (
 __version__ = "0.3.0"
 
 __all__ = [
+    "Agreement",
     "CandidateResult",
     "CorrectnessResult",
+    "CrosscheckResult",
     "Dialect",
     "EquivalenceResult",
     "MatchTimeout",
@@ -66,6 +71,7 @@ __all__ = [
     "__version__",
     "attack_strings",
     "check",
+    "crosscheck",
     "equivalent",
     "evaluate",
     "is_regular",
