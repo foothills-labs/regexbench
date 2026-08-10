@@ -2,18 +2,21 @@
 
 Equivalence checking works by compiling to finite automata, which is only
 possible for patterns that describe regular languages. Anything outside that
-subset — backreferences, lookaround, recursion — is rejected here rather than
-silently mishandled downstream.
+subset — backreferences, recursion — is rejected here rather than silently
+mishandled downstream. Lookaround stays regular and is parsed into
+``Lookaround`` nodes for the automata layer to decide.
 
 Supported: literals, escapes, ``.``, character classes with ranges and
-negation, ``*`` ``+`` ``?`` and ``{m,n}`` repetition, alternation, and
-grouping (capturing or not).
+negation, ``*`` ``+`` ``?`` and ``{m,n}`` repetition, alternation, grouping
+(capturing or not), and the four lookaround assertions.
 
 Anchors are resolved wherever they appear rather than only at the ends: under
 full-match semantics ``^`` holds only if everything before it is empty, so
 ``a^`` is the empty language and ``a?^c`` is ``c``. Under SEARCH semantics an
 anchor away from the ends is still refused, since the ``.*p.*`` rewrite has no
-way to express it.
+way to express it. Anchors inside a lookaround body are different: there they
+describe the position the assertion fires at, so they stay as ``Anchor`` nodes
+and the automata layer treats them as absolute string boundaries.
 
 Where Python's own parser refuses a pattern — ``a**``, ``\\b*``, ``\\q``,
 ``[\\d-z]`` — this refuses it too. A pattern that cannot run under ``re``
@@ -25,6 +28,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from typing import NoReturn
 
 from .types import Dialect, Semantics
 
@@ -50,6 +54,22 @@ SENTINELS = (UNNAMED_DIGIT, UNNAMED_WORD, UNNAMED_SPACE, UNNAMED_OTHER)
 # is the authority, since `check()` executes patterns with that same `re`. A
 # backport or a rebuilt interpreter would make a version test lie.
 NEGATED_BOUNDARY_MATCHES_EMPTY = re.search(r"\B", "") is not None
+
+
+def _re_accepts(pattern: str) -> bool:
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
+
+
+# Possessive quantifiers and atomic groups arrived in CPython 3.11. Probed for
+# the same reason the boundary rule is: `check()` and `screen()` run patterns
+# with the interpreter's own `re`, so answering a pattern that `re` here cannot
+# compile would contradict the other half of every verdict this tool produces.
+POSSESSIVE_SUPPORTED = _re_accepts("a*+")
+ATOMIC_GROUP_SUPPORTED = _re_accepts("(?>a)")
 
 _DIGITS = frozenset("0123456789")
 _WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -113,6 +133,29 @@ class Node:
     pass
 
 
+class UnhandledNode(AssertionError):
+    """A walker was handed a node type it does not name.
+
+    Every walker over the AST ends in :func:`_unhandled` rather than a bare
+    `return False`, because the recurring way this engine has produced wrong
+    answers is a new node type that some walker never learned about. Python's
+    own `ast.NodeVisitor` defaults to a silent `generic_visit`; that default is
+    exactly the failure, so this goes the other way and fails loudly.
+
+    A node a walker genuinely does not care about is still named — in the
+    walker's leaf tuple — so "deliberately nothing to do" reads differently
+    from "nobody thought about it". `tests/test_walkers.py` runs every node
+    type through every walker and fails on this exception.
+    """
+
+
+def _unhandled(node: Node, walker: str) -> NoReturn:
+    raise UnhandledNode(
+        f"{walker} does not handle {type(node).__name__}; add it to the walker "
+        f"(or to its leaf tuple if there is genuinely nothing to do)"
+    )
+
+
 @dataclass(frozen=True)
 class Empty(Node):
     """Matches the empty string."""
@@ -174,15 +217,45 @@ class Repeat(Node):
 class Assert(Node):
     """A zero-width word boundary: `\\b`, or `\\B` when negated.
 
-    Regular despite looking like lookaround — the condition depends only on the
-    two characters either side of the position, so a finite automaton can carry
-    it in its state.
+    Regular even though it looks like lookaround — the condition depends only
+    on the two characters either side of the position, so a finite automaton
+    can carry it in its state.
 
-    The empty string is the one place the two are not exact opposites, and only
-    on some interpreters: see :data:`NEGATED_BOUNDARY_MATCHES_EMPTY`.
+    The empty string is the one place the two are not exact opposites, and
+    only on some interpreters: see :data:`NEGATED_BOUNDARY_MATCHES_EMPTY`.
     """
 
     negated: bool = False
+
+
+@dataclass(frozen=True)
+class Lookaround(Node):
+    """A zero-width lookaround assertion: `(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)`.
+
+    Regular (its body is a regular language, matched against the remaining or
+    the preceding text), so the automata layer decides it rather than the
+    parser refusing it. Only when combined with backreferences does a pattern
+    escape the regular languages.
+
+    ``kind`` is the opening that introduced it, one of ``"="``, ``"!"``,
+    ``"<="``, ``"<!"``. The body is parsed with its anchors kept as
+    :class:`Anchor` nodes: inside a lookaround ``^`` means "the current
+    position is the start of the string" and ``$`` "the end", which is a
+    property of the position the assertion fires at, not of the pattern text.
+    Python fixes the width of lookbehind bodies, so ``kind`` ``"<="`` or
+    ``"<!"`` requires the body to have a fixed width, decided at parse time.
+    """
+
+    kind: str
+    body: Node
+
+    @property
+    def lookahead(self) -> bool:
+        return self.kind in ("=", "!")
+
+    @property
+    def positive(self) -> bool:
+        return self.kind in ("=", "<=")
 
 
 @dataclass(frozen=True)
@@ -268,17 +341,52 @@ def parse(
     if parser.pos != len(parser.src):
         raise Unsupported(f"unexpected {parser.peek()!r} at position {parser.pos}")
     node = _finalize_sticky(node, at_end=True)
+    if _assert_meets_lookaround(node):
+        # The marked machine crosses an assertion only while consuming a real
+        # character, because that is when the boundary either side of it is
+        # known — but a marker fires before any character is consumed, so a
+        # `\b` sitting immediately in front of one can never be crossed and
+        # the branch silently matches nothing. Refuse rather than answer.
+        raise Unsupported(
+            "a word boundary immediately before a lookaround is not supported"
+        )
     if semantics is Semantics.SEARCH:
         # The search reduction widens the pattern with `.*`, which would
         # move any nested anchor away from the position it constrains.
-        # Pattern-edge anchors were already folded into the flags; the
-        # rest are refused rather than mis-answered.
+        # Pattern-edge anchors are folded into the flags; a `^`/`$` that
+        # sits behind only zero-width atoms (`(?=...)`, `\b`, ...) still
+        # marks the pattern edge, so it is folded the same way. Anything
+        # else is refused rather than mis-answered.
+        node, anchored_flags = _fold_edge_anchors(node, parser)
         if _contains_anchor(node):
             raise Unsupported("anchors are only supported at the pattern edges")
+        # `_contains_anchor` does not look inside a lookaround body, because an
+        # anchor there is meaningful rather than misplaced — `(?=^a)` says the
+        # match begins the subject. A `$` there is a different matter: the
+        # subject can always carry one more newline under a search, and the
+        # anchor is folded as plain end-of-string, so `a(?=b$)` missed "ab\n".
+        # The full-match branch below refuses the same shape.
+        if _end_anchor_meets_newline(node, True):
+            raise Unsupported(
+                "`$` inside a lookaround body is not supported under search "
+                "semantics; Python's `$` also matches just before a "
+                "string-final newline"
+            )
+        if anchored_flags[1]:
+            # A folded `$` still allows one trailing newline — Python's `$`
+            # matches just before a newline that ends the subject, and the
+            # search reduction's `[\n]?` needs the newline to exist in the
+            # alphabet or there is no symbol for it to consume.
+            parser.literals.add("\n")
     else:
+        if _end_anchor_meets_newline(node, False):
+            raise Unsupported(
+                "`$` before text that can match a newline is not supported; "
+                "Python's `$` also matches just before a string-final newline"
+            )
         node, _ = _resolve_anchors(node, prefix_nullable=True, suffix_nullable=True)
     if semantics is Semantics.SEARCH:
-        node = _widen_for_search(node, parser.anchored_start, parser.anchored_end)
+        node = _widen_for_search(node, *anchored_flags)
     return node, frozenset(parser.literals)
 
 
@@ -294,14 +402,359 @@ def uses_assertions(node: Node) -> bool:
         return any(uses_assertions(part) for part in node.parts)
     if isinstance(node, Repeat):
         return uses_assertions(node.node)
-    if isinstance(node, Complement):
+    if isinstance(node, (Complement, Poss, Atomic)):
         return uses_assertions(node.node)
-    return False
+    if isinstance(node, Lookaround):
+        # An assertion inside a lookaround body belongs to that body's own
+        # constraint machine, which carries its own entry context, so it does
+        # not make the surrounding operand context-sensitive.
+        return False
+    if isinstance(node, (Empty, CharSet, Anchor)):
+        return False
+    _unhandled(node, "uses_assertions")
 
 
 def any_char() -> CharSet:
     """A set matching every character, including the OTHER sentinel."""
     return CharSet(frozenset(), negated=True)
+
+
+def _right_run_has_assert(node: Node) -> bool:
+    r"""Whether a match of `node` can end on an unresolved `\b`/`\B`."""
+    if isinstance(node, Assert):
+        return True
+    if isinstance(node, Concat):
+        for part in reversed(node.parts):
+            if _right_run_has_assert(part):
+                return True
+            if not _nullable(part):
+                return False
+        return False
+    if isinstance(node, Alternate):
+        return any(_right_run_has_assert(o) for o in node.options)
+    if isinstance(node, (Repeat, Poss)):
+        return node.maximum != 0 and _right_run_has_assert(node.node)
+    if isinstance(node, Atomic):
+        return _right_run_has_assert(node.node)
+    if isinstance(node, (Empty, CharSet, Anchor, Lookaround, Intersect, Complement)):
+        return False
+    _unhandled(node, "_right_run_has_assert")
+
+
+def _left_run_has_lookaround(node: Node) -> bool:
+    """Whether a match of `node` can begin by firing a lookaround marker."""
+    if isinstance(node, Lookaround):
+        return True
+    if isinstance(node, Concat):
+        for part in node.parts:
+            if _left_run_has_lookaround(part):
+                return True
+            if not _nullable(part):
+                return False
+        return False
+    if isinstance(node, Alternate):
+        return any(_left_run_has_lookaround(o) for o in node.options)
+    if isinstance(node, (Repeat, Poss)):
+        return node.maximum != 0 and _left_run_has_lookaround(node.node)
+    if isinstance(node, Atomic):
+        return _left_run_has_lookaround(node.node)
+    if isinstance(node, (Empty, CharSet, Assert, Anchor, Intersect, Complement)):
+        return False
+    _unhandled(node, "_left_run_has_lookaround")
+
+
+def _assert_meets_lookaround(node: Node) -> bool:
+    """Whether a `\b` can sit immediately in front of a lookaround marker.
+
+    A nullable atom between them does not help: when it matches the empty
+    string the marker fires at the boundary's own position, so `\b(x?)(?=b)b`
+    is just as unrepresentable as `\b(?=b)b`. Only an atom that *cannot* be
+    empty pushes the marker past a character, letting the boundary resolve.
+    """
+    if isinstance(node, Concat):
+        parts = node.parts
+        for i, part in enumerate(parts):
+            if not _right_run_has_assert(part):
+                continue
+            for later in parts[i + 1 :]:
+                if _left_run_has_lookaround(later):
+                    return True
+                if not _nullable(later):
+                    break
+        return any(_assert_meets_lookaround(p) for p in parts)
+    if isinstance(node, Alternate):
+        return any(_assert_meets_lookaround(o) for o in node.options)
+    if isinstance(node, Repeat):
+        body = node.node
+        # A second iteration puts the body's tail in front of its own head.
+        if (node.maximum is None or node.maximum > 1) and _right_run_has_assert(
+            body
+        ) and _left_run_has_lookaround(body):
+            return True
+        return _assert_meets_lookaround(body)
+    if isinstance(node, Lookaround):
+        return _assert_meets_lookaround(node.body)
+    if isinstance(node, Intersect):
+        return any(_assert_meets_lookaround(p) for p in node.parts)
+    if isinstance(node, (Complement, Poss, Atomic)):
+        return _assert_meets_lookaround(node.node)
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return False
+    _unhandled(node, "_assert_meets_lookaround")
+
+
+def _matches_newline(node: Node) -> bool:
+    """Whether `node` can match the one-character string "\\n".
+
+    Over-approximated on purpose: every caller uses this to decide whether to
+    refuse, so answering "yes" when the truth is "no" costs coverage and
+    answering "no" when the truth is "yes" costs correctness. Concatenation
+    ignores whether the other parts are nullable, and a complement is assumed
+    to contain the newline, both in the safe direction.
+    """
+    if isinstance(node, CharSet):
+        return node.accepts("\n")
+    if isinstance(node, Concat):
+        return any(_matches_newline(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return any(_matches_newline(option) for option in node.options)
+    if isinstance(node, Intersect):
+        return any(_matches_newline(part) for part in node.parts)
+    if isinstance(node, (Repeat, Poss)):
+        return node.maximum != 0 and _matches_newline(node.node)
+    if isinstance(node, Atomic):
+        return _matches_newline(node.node)
+    if isinstance(node, Complement):
+        return True
+    if isinstance(node, (Empty, Assert, Anchor, Lookaround)):
+        return False  # zero-width: matches the empty string, never "\n"
+    _unhandled(node, "_matches_newline")
+
+
+def _end_anchor_meets_newline(node: Node, after_newline: bool) -> bool:
+    r"""Whether some `$` in `node` can have exactly a newline after it.
+
+    Python's `$` is not "end of string": without `re.MULTILINE` it matches at
+    the end *and* immediately before a newline that ends the string, so
+    `re.fullmatch(r"a$\n", "a\n")` matches. Everything downstream here folds
+    `$` away as plain end-of-string, which is the same thing whenever the
+    text after the anchor cannot be that one trailing newline — and a wrong
+    answer when it can. `a$\n` came back as the empty language, so this engine
+    called it different from `a\n`.
+
+    Under SEARCH the reduction already refuses any anchor that is not at a
+    pattern edge, which is why only full-match verdicts were affected. This
+    is the same refusal drawn tighter: a `$` at the end of the pattern is
+    still decided, because nothing can follow it.
+
+    `after_newline` says whether the text following this node, inside the
+    match, can be exactly "\n". A lookaround body gets `True` unconditionally:
+    what follows a `$` inside it is the rest of the subject, which the body
+    does not constrain.
+    """
+    if isinstance(node, Anchor):
+        return after_newline and not node.is_start
+    if isinstance(node, Concat):
+        found = False
+        tail = after_newline
+        for part in reversed(node.parts):
+            found = found or _end_anchor_meets_newline(part, tail)
+            tail = tail or _matches_newline(part)
+        return found
+    if isinstance(node, Alternate):
+        return any(_end_anchor_meets_newline(o, after_newline) for o in node.options)
+    if isinstance(node, Intersect):
+        return any(_end_anchor_meets_newline(p, after_newline) for p in node.parts)
+    if isinstance(node, (Repeat, Poss)):
+        # A further iteration puts the body's own text after the anchor.
+        repeats = node.maximum is None or node.maximum > 1
+        inner = after_newline or (repeats and _matches_newline(node.node))
+        return _end_anchor_meets_newline(node.node, inner)
+    if isinstance(node, (Complement, Atomic)):
+        return _end_anchor_meets_newline(node.node, after_newline)
+    if isinstance(node, Lookaround):
+        return _end_anchor_meets_newline(node.body, True)
+    if isinstance(node, (Empty, CharSet, Assert)):
+        return False
+    _unhandled(node, "_end_anchor_meets_newline")
+
+
+def _refuse_lookaround_operand(parts: list[Node], operator: str) -> None:
+    """Refuse a lookaround inside a `&` or `~` operand.
+
+    The operand is determinized on its own and entered through a context
+    gate carrying only the word-ness of the preceding character and whether
+    the position is the string start. A lookbehind needs the preceding *text*,
+    which that gate cannot express, so `a(((?<=a)b)&(b))` came out as the
+    empty language instead of matching "ab".
+    """
+    if any(_contains_lookaround(part) for part in parts):
+        raise Unsupported(f"lookaround inside a {operator!r} operand is not supported")
+
+
+def _contains_lookaround(node: Node) -> bool:
+    if isinstance(node, Lookaround):
+        return True
+    if isinstance(node, (Concat, Intersect)):
+        return any(_contains_lookaround(p) for p in node.parts)
+    if isinstance(node, Alternate):
+        return any(_contains_lookaround(o) for o in node.options)
+    if isinstance(node, (Repeat, Complement, Poss, Atomic)):
+        return _contains_lookaround(node.node)
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return False
+    _unhandled(node, "_contains_lookaround")
+
+
+def _nested_fires_at_start(node: Node) -> bool:
+    """Whether every lookaround inside `node` fires at `node`'s own position.
+
+    The marked machine records an assertion as a single zero-width edge, and
+    chains the markers of assertions nested in its body onto that same edge —
+    which is only true when the nested one fires where the outer one does.
+    `(?=(?=^a))a` does; `(?=a(?=b))ab` does not, because the inner assertion
+    sits one character into the body. Rather than certify the inner
+    constraint at the wrong position, the offset case is refused.
+    """
+    if isinstance(node, Lookaround):
+        return True
+    if isinstance(node, Concat):
+        seen_consuming = False
+        for part in node.parts:
+            if seen_consuming and _contains_lookaround(part):
+                return False
+            if not _nested_fires_at_start(part):
+                return False
+            if not _zero_width(part):
+                seen_consuming = True
+        return True
+    if isinstance(node, Alternate):
+        return all(_nested_fires_at_start(option) for option in node.options)
+    if isinstance(node, Repeat):
+        # A second iteration starts past the first, so only a body that
+        # cannot repeat past its own start keeps the firing position.
+        if _contains_lookaround(node.node) and not (
+            node.maximum == 1 or _zero_width(node.node)
+        ):
+            return False
+        return _nested_fires_at_start(node.node)
+    if isinstance(node, (Intersect, Complement)):
+        return not _contains_lookaround(node)
+    if isinstance(node, (Poss, Atomic)):
+        return _nested_fires_at_start(node.node)
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return True
+    _unhandled(node, "_nested_fires_at_start")
+
+
+def _nested_always_fires(node: Node) -> bool:
+    """Whether every lookaround in `node` fires on every path through it.
+
+    A nested assertion's marker rides the outer's edge, so the chain certifies
+    it whenever the outer fires — unconditionally. That is only the body's own
+    condition when the body cannot skip it. `(?=(?![0-9])?a)` can: `re` is free
+    to take the branch where the inner assertion never runs, and the chain
+    enforced it anyway. An alternation is the same problem from the other side,
+    since the chain fires every branch's markers no matter which branch the
+    body takes.
+    """
+    if isinstance(node, Lookaround):
+        # Its own body was checked when it was parsed; bodies nest inwards.
+        return True
+    if isinstance(node, Concat):
+        return all(_nested_always_fires(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return not any(_contains_lookaround(option) for option in node.options)
+    if isinstance(node, Repeat):
+        if node.minimum == 0 and _contains_lookaround(node.node):
+            return False
+        return _nested_always_fires(node.node)
+    if isinstance(node, (Poss, Atomic)):
+        return _nested_always_fires(node.node)
+    if isinstance(node, (Intersect, Complement)):
+        return not _contains_lookaround(node)
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return True
+    _unhandled(node, "_nested_always_fires")
+
+
+def _zero_width(node: Node) -> bool:
+    """Whether `node` can only match the empty string."""
+    if isinstance(node, (Empty, Assert, Anchor)):
+        return True
+    if isinstance(node, Lookaround):
+        return True
+    if isinstance(node, Concat):
+        return all(_zero_width(part) for part in node.parts)
+    if isinstance(node, Alternate):
+        return all(_zero_width(option) for option in node.options)
+    if isinstance(node, Repeat):
+        return node.minimum == 0 and node.maximum == 0
+    if isinstance(node, (Poss, Atomic)):
+        return _zero_width(node.node)
+    if isinstance(node, (CharSet, Intersect, Complement)):
+        return False
+    _unhandled(node, "_zero_width")
+
+
+def _fold_edge_anchors(
+    node: Node, parser: _Parser
+) -> tuple[Node, tuple[bool, bool]]:
+    """Fold a `^`/`$` behind only zero-width atoms into the search flags.
+
+    The literal first and last characters of the pattern fold in the
+    parser. The same folding applies when an anchor follows only zero-width
+    atoms: ``(?!^0*$)...^\\d{1,5}`` under search semantics means the pattern
+    must match at the very start of the string, which is exactly what
+    ``anchored_start`` already encodes. ``(?!…)``, ``(?=…)``, ``\\b`` and
+    groups of them all match the empty string, so a `^` behind them is still
+    the pattern edge. Folding only happens when every option reaches the
+    anchor with zero width, so a mid-pattern anchor still refuses rather
+    than mis-answering.
+    """
+    anchored_start = parser.anchored_start
+    anchored_end = parser.anchored_end
+    if isinstance(node, Concat) and node.parts:
+        parts = list(node.parts)
+        # Skip over zero-width atoms — lookarounds, boundaries, empties.
+        # Only an `Anchor` itself gets folded into the search flags; the
+        # assertions stay, since they still constrain the same position.
+        index = 0
+        while index < len(parts):
+            part = parts[index]
+            if isinstance(part, Anchor):
+                if not part.is_start:
+                    break
+                # Replaced, not removed. Dropping it can leave a bare
+                # `Alternate`, and `_widen_for_search` distributes its
+                # wildcards over an alternation's branches — right for
+                # `^a|b$`, where each anchor binds to one branch, wrong for
+                # `(?:^(a|b)$)`, where both bind to the whole group. The
+                # parser's own folding leaves an `Empty()` here for the same
+                # reason.
+                parts[index] = Empty()
+                anchored_start = True
+                break
+            if not _zero_width(part):
+                break
+            index += 1
+        index = len(parts) - 1
+        while index >= 0:
+            part = parts[index]
+            if isinstance(part, Anchor):
+                if part.is_start:
+                    break
+                parts[index] = Empty()
+                anchored_end = True
+                break
+            if not _zero_width(part):
+                break
+            index -= 1
+        # `_join`, not `Concat`: folding both anchors out of `(^)($)` empties
+        # the list, and a `Concat(())` reaches `_emit`, which indexes
+        # `parts[-1]` and raises IndexError instead of returning a verdict.
+        node = _join(parts)
+    return node, (anchored_start, anchored_end)
 
 
 def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> Node:
@@ -310,15 +763,20 @@ def _widen_for_search(node: Node, anchored_start: bool, anchored_end: bool) -> N
     # does not. Searching for "a" finds it in "\na", so a wrapper built from
     # `.` would wrongly forbid the surrounding text from containing newlines.
     any_run = Repeat(any_char(), 0, None)
+    # What a folded `$` still allows after the match. Python's `$` is not
+    # end-of-string: without `re.MULTILINE` it also matches immediately before
+    # a newline that ends the subject, so `re.search("b$", "b\n")` finds it.
+    # Dropping the trailing wildcard outright would forbid that newline and
+    # make this engine call `(a|\n)b` different from `(a|\n)b$`.
+    trailing_newline = Repeat(CharSet(frozenset("\n")), 0, 1)
 
     def wrap(inner: Node, prefix: bool, suffix: bool) -> Node:
         parts: list[Node] = []
         if prefix:
             parts.append(any_run)
         parts.append(inner)
-        if suffix:
-            parts.append(any_run)
-        return parts[0] if len(parts) == 1 else Concat(tuple(parts))
+        parts.append(any_run if suffix else trailing_newline)
+        return Concat(tuple(parts))
 
     if isinstance(node, Alternate):
         # A leading ^ anchors only the first branch and a trailing $ only the
@@ -352,19 +810,85 @@ def _nullable(node: Node) -> bool:
         return node.minimum == 0 or _nullable(node.node)
     if isinstance(node, Intersect):
         return all(_nullable(part) for part in node.parts)
-    return not _nullable(node.node)  # Complement
+    if isinstance(node, Lookaround):
+        # Zero-width, so it never contributes characters — nullable in the
+        # width sense whatever its body does, exactly like `\b`. Whether the
+        # assertion *holds* is a property of the position, decided by the
+        # automaton; reading the body's nullability here made `(?=a)` look
+        # like a consuming atom and collapsed `(?=a)^a` to the empty language.
+        return True
+    if isinstance(node, (Poss, Atomic)):
+        return _nullable(node.node)
+    if isinstance(node, Complement):
+        return not _nullable(node.node)
+    _unhandled(node, "_nullable")
 
 
 def _contains_anchor(node: Node) -> bool:
+    # Anchors inside lookaround bodies are absolute — `^` means "this is the
+    # start of the string" wherever the assertion fires — so they are the
+    # automaton's business, not the search-rewrite's.
+    if isinstance(node, Lookaround):
+        return False
     if isinstance(node, Anchor):
         return True
     if isinstance(node, Concat):
         return any(_contains_anchor(part) for part in node.parts)
     if isinstance(node, Alternate):
         return any(_contains_anchor(option) for option in node.options)
-    if isinstance(node, Repeat):
+    if isinstance(node, (Repeat, Poss, Atomic)):
         return _contains_anchor(node.node)
-    return False
+    if isinstance(node, Intersect):
+        return any(_contains_anchor(part) for part in node.parts)
+    if isinstance(node, Complement):
+        return _contains_anchor(node.node)
+    if isinstance(node, (Empty, CharSet, Assert)):
+        return False
+    _unhandled(node, "_contains_anchor")
+
+
+def _fixed_width(node: Node) -> int | None:
+    """The common length of every string `node` matches, or None.
+
+    Python refuses a lookbehind whose body can match different lengths, so the
+    parser makes the same refusal and says what it is instead of compiling a
+    machine that would silently approximate.
+    """
+    if isinstance(node, (Empty, Assert, Anchor, Lookaround)):
+        return 0
+    if isinstance(node, CharSet):
+        return 1
+    if isinstance(node, Concat):
+        widths = [_fixed_width(part) for part in node.parts]
+        if any(w is None for w in widths):
+            return None
+        return sum(widths)  # type: ignore[return-value]
+    if isinstance(node, Alternate):
+        widths = [_fixed_width(option) for option in node.options]
+        if any(w is None for w in widths):
+            return None
+        if len(set(widths)) != 1:
+            return None
+        return widths[0]
+    if isinstance(node, Repeat):
+        if node.minimum != node.maximum:
+            return None
+        width = _fixed_width(node.node)
+        if width is None:
+            return None
+        return width * node.minimum
+    if isinstance(node, Intersect):
+        widths = [_fixed_width(part) for part in node.parts]
+        if any(w is None for w in widths):
+            return None
+        if len(set(widths)) != 1:
+            return None
+        return widths[0]
+    if isinstance(node, (Poss, Atomic)):
+        return _fixed_width(node.node)
+    if isinstance(node, Complement):
+        return None  # its words are not all one length
+    _unhandled(node, "_fixed_width")
 
 
 # Resolving an anchor inside a concatenation enumerates which part carries it,
@@ -376,29 +900,48 @@ _MAX_RESOLVED_NODES = 200_000
 
 
 class _ResolveState:
-    """Memo tables for one `_resolve_anchors` call, plus the size budget."""
+    """Memo tables for one `_resolve_anchors` call, plus the size budget.
+
+    Both tables are keyed on `id(node)`, and both therefore have to hold the
+    node itself in the value. Resolution builds nodes as it goes and drops
+    most of them again; CPython hands a freed address straight back to the
+    next allocation, so an entry whose key outlives its node is an entry a
+    *different* node can collide with. That is a wrong answer, not a slow
+    one, and it depends on allocation order, which is why it showed up as a
+    pattern that disagreed with `re` only when another pattern had been
+    resolved first. Keeping a reference makes the address unreusable for as
+    long as the entry can be read.
+    """
 
     __slots__ = ("memo", "sizes")
 
     def __init__(self) -> None:
-        self.memo: dict[tuple[int, bool, bool], tuple[Node, bool]] = {}
-        self.sizes: dict[int, int] = {}
+        self.memo: dict[tuple[int, bool, bool], tuple[Node, tuple[Node, bool]]] = {}
+        self.sizes: dict[int, tuple[Node, int]] = {}
 
 
-def _node_count(node: Node, sizes: dict[int, int]) -> int:
-    """Nodes in `node`, memoised on identity so shared subtrees cost once."""
+def _node_count(node: Node, sizes: dict[int, tuple[Node, int]]) -> int:
+    """Nodes in `node`, memoised on identity so shared subtrees cost once.
+
+    The value keeps `node` alive; see `_ResolveState` for why identity keys
+    are only safe that way.
+    """
     hit = sizes.get(id(node))
     if hit is not None:
-        return hit
+        return hit[1]
     if isinstance(node, (Concat, Intersect)):
         total = 1 + sum(_node_count(p, sizes) for p in node.parts)
     elif isinstance(node, Alternate):
         total = 1 + sum(_node_count(o, sizes) for o in node.options)
     elif isinstance(node, (Repeat, Complement, Atomic, Poss)):
         total = 1 + _node_count(node.node, sizes)
-    else:
+    elif isinstance(node, Lookaround):
+        total = 1 + _node_count(node.body, sizes)
+    elif isinstance(node, (Empty, CharSet, Assert, Anchor)):
         total = 1
-    sizes[id(node)] = total
+    else:
+        _unhandled(node, "_node_count")
+    sizes[id(node)] = (node, total)
     return total
 
 
@@ -448,11 +991,11 @@ def _resolve_cached(
     key = (id(node), prefix_nullable, suffix_nullable)
     hit = cache.memo.get(key)
     if hit is not None:
-        return hit
+        return hit[1]
     result = _resolve_impl(node, prefix_nullable, suffix_nullable, cache)
     if _node_count(result[0], cache.sizes) > _MAX_RESOLVED_NODES:
         raise Unsupported("resolving anchors expands the pattern past the node budget")
-    cache.memo[key] = result
+    cache.memo[key] = (node, result)
     return result
 
 
@@ -548,11 +1091,49 @@ def _resolve_impl(
             # nothing but still constrains the position, and `re` fails
             # `($)\b` on the empty subject for exactly that reason. The
             # epsilon-restriction keeps those assertions and drops the rest.
-            front = [_epsilon_restrict(p) for p in parts[:start]] if start >= 0 else []
-            back = [_epsilon_restrict(p) for p in parts[end + 1 :]]
+            head_parts = parts[:start] if start >= 0 else []
+            tail_parts = parts[end + 1 :]
             middle = Concat(tuple(parts[start + 1 : end]))
             resolved, _ = _resolve_cached(middle, prefix_nullable, suffix_nullable, cache)
-            return _join([*front, resolved, *back]), True
+
+            def restrict(part: Node, before: bool, after: bool) -> Node:
+                node, _ = _resolve_cached(part, before, after, cache)
+                return _epsilon_restrict(node)
+
+            if not any(_contains_anchor(p) for p in (*head_parts, *tail_parts)):
+                front = [_epsilon_restrict(p) for p in head_parts]
+                back = [_epsilon_restrict(p) for p in tail_parts]
+                return _join([*front, resolved, *back]), True
+
+            # A region collapsed to the empty string can still contain an
+            # anchor of its own, and dropping it is how `a$(^)+` came back
+            # matching "a": `re` needs that `^` at position zero, and the `a`
+            # in front of it makes that impossible. The anchor is nested, so
+            # the scan above never saw it.
+            #
+            # Whether it holds depends on the middle, which is the only text
+            # that can be non-empty here, so the two cases are taken apart.
+            # When the middle matches something, a `^` after it and a `$`
+            # before it are both dead; when the middle is empty too, the whole
+            # concatenation is, and they hold exactly as the outer flags allow.
+            occupied = _join(
+                [
+                    *[restrict(p, prefix_nullable, False) for p in head_parts],
+                    resolved,
+                    *[restrict(p, False, suffix_nullable) for p in tail_parts],
+                ]
+            )
+            vacant = _join(
+                [
+                    *[restrict(p, prefix_nullable, suffix_nullable) for p in head_parts],
+                    _epsilon_restrict(resolved),
+                    *[
+                        restrict(p, prefix_nullable, suffix_nullable)
+                        for p in tail_parts
+                    ],
+                ]
+            )
+            return Alternate((occupied, vacant)), True
         # No anchors at this level; every part may carry its own. A nested
         # `^` holds only when the actual text before the part is empty, a
         # nested `$` only when the text after it is — "can be empty" is not
@@ -644,6 +1225,13 @@ def _resolve_impl(
     return node, False
 
 
+def _operands(node: Node) -> tuple[Node, ...]:
+    """The child nodes of a branching node, whichever field holds them."""
+    if isinstance(node, Alternate):
+        return node.options
+    return node.parts  # Concat, Intersect
+
+
 def _epsilon_restrict(node: Node) -> Node:
     """The empty-string part of `node`, with its assertions kept.
 
@@ -652,7 +1240,10 @@ def _epsilon_restrict(node: Node) -> Node:
     collapses to the empty string (it was already checked to be nullable) or
     to the empty language.
     """
-    if isinstance(node, Assert):
+    if isinstance(node, Assert) or isinstance(node, Lookaround):
+        # Both consume nothing and both still constrain the position, so a
+        # region forced to the empty string keeps them. Dropping the
+        # lookaround made `(?!a?)a` equivalent to `a`, when it matches nothing.
         return node
     if isinstance(node, Empty) or isinstance(node, Anchor):
         return Empty()
@@ -670,7 +1261,12 @@ def _epsilon_restrict(node: Node) -> Node:
         # An intersection matches the empty string where every operand does,
         # so each operand's assertions still constrain the position.
         return Intersect(tuple(_epsilon_restrict(p) for p in node.parts))
-    return Empty()  # Complement: its ε part is unconstrained by what it negates
+    if isinstance(node, (Poss, Atomic)):
+        return _epsilon_restrict(node.node)
+    if isinstance(node, Complement):
+        # Its ε part is unconstrained by what it negates.
+        return Empty()
+    _unhandled(node, "_epsilon_restrict")
 
 
 def _join(nodes: list[Node]) -> Node:
@@ -684,7 +1280,8 @@ def _ambiguous(node: Node) -> bool:
     """Whether `node` can match a given position several different ways.
 
     Repetitions pick a count and alternations pick a branch, so both are
-    ambiguous; everything else is determined by the input.
+    ambiguous; everything else is determined by the input. A lookaround is
+    zero-width and either holds or not, so it never adds ambiguity.
     """
     if isinstance(node, (Repeat, Poss, Alternate)):
         return True
@@ -692,8 +1289,18 @@ def _ambiguous(node: Node) -> bool:
         return any(_ambiguous(part) for part in node.parts)
     if isinstance(node, (Atomic, Complement)):
         return _ambiguous(node.node)
-    return False
-
+    if isinstance(node, Lookaround):
+        # The assertion is zero-width and either holds or not: the body's own
+        # ambiguity only concerns the body's match, which decides the
+        # assertion deterministically. So the group never adds ambiguity.
+        return False
+    if isinstance(node, (Poss, Atomic)):
+        return _ambiguous(node.node)
+    if isinstance(node, (Intersect, Complement)):
+        return True  # operand shape is not modelled; assume it can vary
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return False
+    _unhandled(node, "_ambiguous")
 
 def _sticky_problem(node: Node) -> bool:
     """Whether `node` contains a possessive repeat or an atomic group whose
@@ -712,7 +1319,13 @@ def _sticky_problem(node: Node) -> bool:
         return any(_sticky_problem(part) for part in node.parts)
     if isinstance(node, (Repeat, Complement)):
         return _sticky_problem(node.node)
-    return False
+    if isinstance(node, Lookaround):
+        return _sticky_problem(node.body)
+    if isinstance(node, (Alternate, Intersect)):
+        return any(_sticky_problem(p) for p in _operands(node))
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return False
+    _unhandled(node, "_sticky_problem")
 
 
 def _finalize_sticky(node: Node, at_end: bool) -> Node:
@@ -761,7 +1374,14 @@ def _finalize_sticky(node: Node, at_end: bool) -> Node:
         )
     if isinstance(node, Complement):
         return Complement(_finalize_sticky(node.node, at_end))
-    return node
+    if isinstance(node, Lookaround):
+        # The body is matched against a window with nothing following it
+        # inside the assertion, so a trailing possessive quantifier in the
+        # body is as transparent as at the end of a branch.
+        return Lookaround(node.kind, _finalize_sticky(node.body, at_end=True))
+    if isinstance(node, (Empty, CharSet, Assert, Anchor)):
+        return node
+    _unhandled(node, "_finalize_sticky")
 
 
 class _Parser:
@@ -806,7 +1426,10 @@ class _Parser:
         while self.brics and self.peek() == "&":
             self.eat()
             parts.append(self.parse_concat())
-        return parts[0] if len(parts) == 1 else Intersect(tuple(parts))
+        if len(parts) == 1:
+            return parts[0]
+        _refuse_lookaround_operand(parts, "&")
+        return Intersect(tuple(parts))
 
     def parse_concat(self) -> Node:
         parts: list[Node] = []
@@ -855,6 +1478,10 @@ class _Parser:
                 self.eat()
             elif self.peek() == "+":
                 self.eat()
+                if not POSSESSIVE_SUPPORTED:
+                    raise Unsupported(
+                        "possessive quantifiers need CPython 3.11 or newer"
+                    )
                 node = Poss(node.node, node.minimum, node.maximum)
         return node
 
@@ -893,7 +1520,9 @@ class _Parser:
         """dk.brics `~`, which binds tighter than concatenation."""
         if self.brics and self.peek() == "~":
             self.eat()
-            return Complement(self.parse_complement())
+            inner = self.parse_complement()
+            _refuse_lookaround_operand([inner], "~")
+            return Complement(inner)
         return self.parse_atom()
 
     def parse_atom(self) -> Node:
@@ -906,6 +1535,16 @@ class _Parser:
         if ch == "[":
             return self._char_class()
         if ch == ".":
+            if self.brics:
+                # dk.brics' dot matches every character, the newline included:
+                # its patterns are over plain strings, with no line concept.
+                return any_char()
+            # `.` matches every character except the newline — the one
+            # Unicode distinction it draws without naming a character. The
+            # newline has to join the alphabet or it is conflated with the
+            # rest of the whitespace sentinel, and `a.` comes back equivalent
+            # to `ab|a[^b]` although the two differ on "a\n".
+            self.literals.add("\n")
             return CharSet(frozenset("\n"), negated=True)
         if ch == "\\":
             return self._escape()
@@ -945,10 +1584,75 @@ class _Parser:
             if rest.startswith("?:"):
                 self.pos += 2
             elif rest.startswith(("?=", "?!", "?<=", "?<!")):
-                # Not NonRegular: lookaround alone preserves regularity, so
-                # this is decidable and merely unimplemented. Only combining it
-                # with backreferences escapes the regular languages.
-                raise Unsupported("lookaround is not supported")
+                # Lookaround keeps the language regular, so this parses into a
+                # `Lookaround` node for the automata layer to decide. Anchors
+                # inside the body are absolute — `^` means "the current
+                # position is the start of the string", `$` the end — so they
+                # stay as `Anchor` nodes rather than being resolved here.
+                opened = ""
+                for opener, kind in (
+                    ("?<=", "<="),
+                    ("?<!", "<!"),
+                    ("?=", "="),
+                    ("?!", "!"),
+                ):
+                    if rest.startswith(opener):
+                        self.pos += len(opener)
+                        opened = kind
+                        break
+                body = self.parse_alternation()
+                if self.peek() != ")":
+                    raise Unsupported("unbalanced parenthesis")
+                self.eat()
+                if opened in ("<=", "<!") and _fixed_width(body) is None:
+                    raise Unsupported("look-behind requires fixed-width pattern")
+                if opened in ("<=", "<!") and _right_run_has_assert(body):
+                    # A lookbehind is certified by a sliding window over the
+                    # text already read, and the window ends where the
+                    # assertion fires. A `\b` on that right edge needs the
+                    # character *after* the window, which is the one thing the
+                    # window cannot see — so `(?<=\b)a` was certified as
+                    # "preceded by a word character, no boundary" and rejected
+                    # "a", and `(?<=\d\b)(?!,)` found a match in "0z" where
+                    # `re` finds none.
+                    #
+                    # A boundary anywhere else in the body is fine: at the left
+                    # edge the entry context carries the preceding character,
+                    # and in the middle both sides are inside the window.
+                    raise Unsupported(
+                        "a word boundary at the end of a lookbehind body is "
+                        "not supported"
+                    )
+                if not _nested_fires_at_start(body):
+                    raise Unsupported(
+                        "a lookaround nested past the start of another's body "
+                        "is not supported"
+                    )
+                if opened != "=" and _contains_lookaround(body):
+                    # A nested assertion is checked by chaining its marker
+                    # onto this one's, which certifies it against the real
+                    # subject at *this* position. That is exactly the body's
+                    # own condition only under a positive lookahead, whose
+                    # body begins where the assertion fires.
+                    #
+                    # Under a negative one it is De Morgan run backwards:
+                    # `(?!(?=a)b)` fails when the conjunction fails, and the
+                    # chain asks instead that neither conjunct hold, so
+                    # `(?!(?!a))a` matched nothing where `re` matches "a".
+                    # Under a lookbehind the position is wrong as well — the
+                    # body ends at the firing position and starts a body's
+                    # width earlier — so `(?<=(?<=a)b)` was certified against
+                    # the text after the match and rejected "ab".
+                    raise Unsupported(
+                        "a lookaround nested inside a negative lookaround or "
+                        "a lookbehind is not supported"
+                    )
+                if not _nested_always_fires(body):
+                    raise Unsupported(
+                        "a lookaround nested in a body that can skip it is "
+                        "not supported"
+                    )
+                return Lookaround(kind=opened, body=body)
             elif rest.startswith("?>"):
                 # Atomicity changes the language only when the content can
                 # match several ways and later text could backtrack into it;
@@ -970,6 +1674,8 @@ class _Parser:
         if self.peek() != ")":
             raise Unsupported("unbalanced parenthesis")
         self.eat()
+        if atomic and not ATOMIC_GROUP_SUPPORTED:
+            raise Unsupported("atomic groups need CPython 3.11 or newer")
         return Atomic(node) if atomic else node
 
     def _escape(self) -> Node:

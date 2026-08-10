@@ -8,12 +8,19 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .agreement import crosscheck
 from .correctness import check
-from .datasets import load_deep_regex, load_regexeval, load_tasks, task_from_dict
+from .datasets import (
+    load_deep_regex,
+    load_linguafranca,
+    load_regexeval,
+    load_tasks,
+    task_from_dict,
+)
 from .equivalence import equivalent
 from .harness import run as run_suite
 from .safety import screen
-from .types import Dialect, Semantics, Task, Verdict
+from .types import Agreement, Dialect, Semantics, Task, Verdict
 
 _LOADERS = ("regexeval", "deep-regex", "tasks")
 
@@ -62,6 +69,20 @@ def _build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--prompt", default="raw", help="regexeval only: raw or refined")
     batch.add_argument("--json", dest="as_json", help="also write the summary here as JSON")
     batch.add_argument("--quiet", action="store_true", help="no progress on stderr")
+
+    cross = sub.add_parser(
+        "crosscheck",
+        help="check this engine against `re` over a file of patterns",
+        description="Compare each pattern's automaton to what `re` matches, string "
+        "by string. Reads JSON-lines LinguaFranca corpora and plain text files, one "
+        "pattern per line. Exits non-zero if anything disagrees.",
+    )
+    cross.add_argument("path", help="corpus file, or - for stdin")
+    cross.add_argument("--search", action="store_true", help="compare as re.search")
+    cross.add_argument("--registry", help="LinguaFranca only: keep patterns used by e.g. pypi")
+    cross.add_argument("--limit", type=int, help="stop after N patterns")
+    cross.add_argument("--longest", type=int, default=3, help="longest string to compare")
+    cross.add_argument("--quiet", action="store_true", help="no progress on stderr")
 
     return parser
 
@@ -172,7 +193,74 @@ def _check(args: argparse.Namespace) -> int:
     return 0 if result.perfect else 1
 
 
-_COMMANDS = {"eq": _eq, "safety": _safety, "check": _check, "run": _run}
+def _read_patterns(args: argparse.Namespace) -> list[str]:
+    """Patterns from a LinguaFranca corpus, or one per line from a text file.
+
+    Which one is decided by the first non-empty line, so a corpus with a
+    corrupt line partway through fails loudly instead of quietly falling back
+    to reading its JSON as literal patterns.
+    """
+    if args.path == "-":
+        lines = sys.stdin.read().splitlines()
+    else:
+        lines = Path(args.path).read_text(encoding="utf-8").splitlines()
+        if _is_json_object(next((line for line in lines if line.strip()), "")):
+            return load_linguafranca(args.path, registry=args.registry, limit=args.limit)
+
+    patterns = [line for line in lines if line.strip()]
+    return patterns[: args.limit] if args.limit else patterns
+
+
+def _is_json_object(line: str) -> bool:
+    try:
+        return isinstance(json.loads(line), dict)
+    except ValueError:
+        return False
+
+
+def _crosscheck(args: argparse.Namespace) -> int:
+    semantics = Semantics.SEARCH if args.search else Semantics.FULLMATCH
+    patterns = _read_patterns(args)
+
+    agreed = compared = 0
+    unchecked: dict[str, int] = {}
+    disagreements: list[tuple[str, str]] = []
+
+    for index, pattern in enumerate(patterns, start=1):
+        if not args.quiet and index % 2000 == 0:
+            print(f"  {index}/{len(patterns)}", file=sys.stderr, flush=True)
+        result = crosscheck(pattern, semantics=semantics, longest=args.longest)
+        if result.agreement is Agreement.AGREES:
+            agreed += 1
+            compared += result.compared
+        elif result.agreement is Agreement.DISAGREES:
+            disagreements.append((pattern, result.reason))
+        else:
+            reason = result.reason.split(" at position")[0]
+            unchecked[reason] = unchecked.get(reason, 0) + 1
+
+    total_unchecked = sum(unchecked.values())
+    print(f"patterns          : {len(patterns)}")
+    print(f"crosschecked      : {agreed + len(disagreements)}")
+    print(f"strings compared  : {compared}")
+    print(f"unchecked         : {total_unchecked}")
+    print(f"DISAGREEMENTS     : {len(disagreements)}")
+    for pattern, reason in disagreements[:20]:
+        print(f"    {pattern[:60]!r}: {reason}")
+    if unchecked and not args.quiet:
+        print("\nwhy patterns went unchecked:")
+        for reason, count in sorted(unchecked.items(), key=lambda kv: -kv[1])[:12]:
+            print(f"  {count:7}  {reason[:64]}")
+    return 1 if disagreements else 0
+
+
+_COMMANDS = {
+    "eq": _eq,
+    "safety": _safety,
+    "check": _check,
+    "run": _run,
+    "crosscheck": _crosscheck,
+}
 
 
 def main(argv: list[str] | None = None) -> int:

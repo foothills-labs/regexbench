@@ -10,9 +10,9 @@ class Verdict(enum.Enum):
     """The answer to "are these two patterns the same language?"
 
     UNDECIDABLE is not a failure to compute — it is the correct answer when a
-    pattern uses backreferences or lookaround, which make the language
-    non-regular and equivalence formally undecidable. Reporting a guess there
-    would be worse than reporting nothing.
+    pattern uses backreferences, which make the language non-regular and
+    equivalence formally undecidable. Reporting a guess there would be worse
+    than reporting nothing.
     """
 
     EQUIVALENT = "equivalent"
@@ -73,6 +73,42 @@ class EquivalenceResult:
 
     def __bool__(self) -> bool:
         return self.verdict is Verdict.EQUIVALENT
+
+
+class Agreement(enum.Enum):
+    """Whether this engine's automaton matches what Python's `re` matches.
+
+    UNCHECKED is the ordinary outcome for a pattern the engine refuses or
+    `re` will not compile. It is not a failure and not a pass: nothing was
+    compared, which is a different statement from "the two agree".
+    """
+
+    AGREES = "agrees"
+    DISAGREES = "disagrees"
+    UNCHECKED = "unchecked"
+
+
+@dataclass(frozen=True)
+class CrosscheckResult:
+    """One pattern's automaton weighed against `re`, string by string."""
+
+    agreement: Agreement
+    #: The string the two answer differently on, when they do.
+    witness: str | None = None
+    #: Why nothing was compared, when nothing was.
+    reason: str = ""
+    #: How many strings were compared.
+    compared: int = 0
+    #: The alphabet those strings were drawn from.
+    alphabet: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        """True unless a disagreement was actually found.
+
+        An UNCHECKED pattern is not evidence against the engine, so it does
+        not fail a sweep — count the agreements if you want coverage.
+        """
+        return self.agreement is not Agreement.DISAGREES
 
 
 @dataclass(frozen=True)

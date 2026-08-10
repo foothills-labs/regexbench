@@ -9,6 +9,12 @@ these read the datasets the regex-generation literature actually reports on:
   gold pattern in dk.brics syntax and no examples, scored by equivalence.
 * :func:`load_tasks` — your own problems, in a format you control.
 
+One loader here is not a benchmark:
+
+* :func:`load_linguafranca` — half a million patterns people actually wrote,
+  with no prompt and no reference. Nothing to score a model against; what they
+  are for is checking this engine against `re` on syntax nobody curated.
+
 No dataset is redistributed with this package. Each loader takes the path to
 files you download yourself, which keeps their licensing theirs and keeps
 `regexbench` dependency-free and small.
@@ -21,11 +27,13 @@ cannot be compared to anything.
 
 from .custom import load_tasks, task_from_dict
 from .deep_regex import load_deep_regex
+from .linguafranca import load_linguafranca
 from .regexeval import PROMPT_STYLES, load_regexeval
 
 __all__ = [
     "PROMPT_STYLES",
     "load_deep_regex",
+    "load_linguafranca",
     "load_regexeval",
     "load_tasks",
     "task_from_dict",

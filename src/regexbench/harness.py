@@ -198,9 +198,12 @@ class SuiteReport:
         engine limit counts against the model. This asks how much of what could
         be checked was correct, so it measures the model alone.
 
-        On KB13 a flawless model scores 51.1% by the first reading and 100% by
-        the second; the difference is entirely `\\b`. Neither number is wrong
-        and neither is sufficient, which is why both are reported.
+        On Re(gEx|DoS)Eval the spread is the engine's coverage: only 82.5% of
+        the references parse under the search semantics the corpus is scored
+        with, so on the other 17.5% a candidate that is not textually
+        identical to its reference comes back undecidable and counts as a
+        failure under the first reading. Neither number is wrong and neither
+        is sufficient, which is why both are reported.
 
         A task counts as decided when at least one of its candidates produced a
         verdict — undecidable candidates within a decided task still count as

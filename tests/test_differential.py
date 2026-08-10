@@ -23,6 +23,7 @@ A seeded generator keeps failures reproducible.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import random
 import re
@@ -31,6 +32,9 @@ from collections.abc import Callable, Sequence
 import pytest
 
 from regexbench import Dialect, EquivalenceResult, Semantics, Verdict, equivalent
+from regexbench._automata import build_dfa
+from regexbench._parse import Unsupported, parse
+from regexbench._syntax import CORPUS_ALPHABET, SYNTAX, atoms_for, available
 
 Matcher = Callable[[str], bool]
 
@@ -51,13 +55,32 @@ def corpus(alphabet: str, longest: int = 3) -> list[str]:
     ]
 
 
+@functools.cache
+def _compiles(pattern: str) -> bool:
+    """Whether `re` accepts `pattern` — memoised, since the atoms repeat."""
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
+
+
 def generator(atoms: Sequence[str]) -> Callable[[random.Random, int], str]:
-    """A seeded random pattern builder drawing from `atoms`."""
+    """A seeded random pattern builder drawing from `atoms`.
+
+    A quantifier is only attached when the result compiles. Asking `re` beats
+    the hardcoded exception list this used to carry: that list named `\\b` and
+    `\\B`, so every draw of `^` or `$` became `^*` or `$+` and was thrown away
+    as a syntax error. Anchors were then all but absent from the surface run —
+    which is how a trailing `$` went unchecked while it was being folded as
+    plain end-of-string.
+    """
 
     def build(rng: random.Random, depth: int = 0) -> str:
         pattern = rng.choice(atoms)
-        if pattern not in ZERO_WIDTH:
-            pattern += rng.choice(QUANTIFIERS)
+        quantifier = rng.choice(QUANTIFIERS)
+        if quantifier and _compiles(pattern + quantifier):
+            pattern += quantifier
         if depth < 2 and rng.random() < 0.5:
             pattern += build(rng, depth + 1)
         return pattern
@@ -458,3 +481,192 @@ def test_nested_anchor_verdicts_agree_with_re(seed: int, semantics: Semantics) -
     # most of what this generator emits is UNSUPPORTED by design.
     floor = 8 if semantics is Semantics.SEARCH else 40
     assert checked > floor, "generator produced too few analyzable pairs to be meaningful"
+
+
+# --------------------------------------------------------------------------
+# Lookaround.
+#
+# The generator below is the one that was missing when lookaround landed. The
+# existing lookaround coverage was a table of curated pairs plus the BRICS
+# translation above, which only ever emits `(?=(?:X)$)` and `(?!(?:X)$)` —
+# always `$`-anchored, always leading, never nested, never a lookbehind. Six
+# families of wrong verdict lived in the shapes it could not produce.
+
+LOOKAROUND_ATOMS = [
+    "a", "b", "[ab]", "a?",
+    "(?=a)", "(?!a)", "(?=ab)", "(?!ab)",
+    "(?<=a)", "(?<!a)", "(?<=ab)", "(?<!ab)",
+    "(?=a)b", "a(?=b)", "(?<=a)b", "(?<!a)b",
+    # Assertions meeting anchors and boundaries: `(?=a)^a` and `a$(?!b)` both
+    # came back with the wrong verdict because a zero-width assertion was
+    # read as a consuming atom.
+    "^", "$", r"\b", r"\B", "(?=.)", "(?!.)",
+    # Nullable and empty bodies: `(?!a?)a` matches nothing, and the assertion
+    # must survive a region being forced to the empty string.
+    "(?!a?)", "(?=a?)", "(?!)",
+    # Nested at the body start, which fires at the same position and is
+    # decided; nesting past the start is refused, not answered. The body must
+    # also carry consuming text — `(?=(?!b)a)` matched the empty string while
+    # the chained markers were alternatives, and a body of nothing but the
+    # nested assertion cannot show that.
+    "(?=(?=a))", "(?=(?!b))",
+    "(?=(?!b)a)", "(?=(?=a)a)", "(?<=(?<!a)b)", "(?<=(?<=a)b)",
+    # Refused rather than answered, so these only ever skip — but a change
+    # that starts deciding them lands in the membership check below.
+    "(?!(?=a))", "(?!(?!a))", "(?<!(?<=a)b)",
+]
+LOOKAROUNDS = generator(LOOKAROUND_ATOMS)
+LOOKAROUND_CORPUS = corpus("ab", longest=4)
+
+
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(6))
+def test_lookaround_verdicts_agree_with_re(seed: int, semantics: Semantics) -> None:
+    """`(?!a?)a` matches nothing and `(?=a)^a` matches "a" — neither is `a`."""
+    rng = random.Random(seed)
+    method = method_for(semantics)
+    checked = 0
+
+    for _ in range(150):
+        left, right = LOOKAROUNDS(rng), LOOKAROUNDS(rng)
+        try:
+            compiled_left, compiled_right = re.compile(left), re.compile(right)
+        except re.error:
+            continue
+
+        result = equivalent(left, right, semantics=semantics)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+        cross_check(
+            result,
+            matcher(compiled_left, method),
+            matcher(compiled_right, method),
+            LOOKAROUND_CORPUS,
+            f"{method} of {left!r} and {right!r}",
+        )
+
+    assert checked > 30, "generator produced too few analyzable pairs to be meaningful"
+
+
+# --------------------------------------------------------------------------
+# The whole supported-syntax surface.
+#
+# The generators above are hand-written atom lists, and each was written after
+# a family of wrong verdicts had already shipped through the gap it covers:
+# escapes, then misplaced anchors, then lookaround. A list someone maintains by
+# hand tests what someone remembered.
+#
+# This one draws its atoms from `_syntax.SYNTAX`, the single declaration of
+# what the engine claims to support. `tests/test_syntax_surface.py` checks that
+# declaration against the parser's own tables in both directions, so a
+# construct cannot be supported without being generated here.
+
+SURFACE = generator(atoms_for(Dialect.PYTHON))
+# The alphabet is declared next to the atoms, and pinned against the parser's
+# own class tables, for the same reason the atoms are: a corpus that cannot
+# express a difference hides it. "ab" could not, and `$` went unchecked.
+SURFACE_CORPUS = corpus(CORPUS_ALPHABET, longest=3)
+
+
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(8))
+def test_whole_surface_verdicts_agree_with_re(seed: int, semantics: Semantics) -> None:
+    rng = random.Random(seed)
+    method = method_for(semantics)
+    checked = 0
+
+    for _ in range(150):
+        left, right = SURFACE(rng), SURFACE(rng)
+        try:
+            compiled_left, compiled_right = re.compile(left), re.compile(right)
+        except re.error:
+            continue
+
+        result = equivalent(left, right, semantics=semantics)
+        if result.verdict in (Verdict.UNSUPPORTED, Verdict.UNDECIDABLE):
+            continue
+        checked += 1
+        cross_check(
+            result,
+            matcher(compiled_left, method),
+            matcher(compiled_right, method),
+            SURFACE_CORPUS,
+            f"{method} of {left!r} and {right!r}",
+        )
+
+    assert checked > 10, "generator produced too few analyzable pairs to be meaningful"
+
+
+def test_the_generator_reaches_every_construct_it_claims() -> None:
+    """Grammar coverage: every declared construct has to actually be emitted.
+
+    A declaration the generator never reaches is worse than no declaration,
+    because it reads like coverage. This is the adequacy criterion the
+    grammar-fuzzing literature uses — every production exercised, rather than
+    a random walk that happens to visit some of them.
+    """
+    emitted: set[str] = set()
+    for seed in range(40):
+        rng = random.Random(seed)
+        for _ in range(200):
+            emitted.add(SURFACE(rng))
+
+    joined = "\n".join(emitted)
+    missing = [
+        c.atom
+        for c in SYNTAX
+        if c.dialect is Dialect.PYTHON and available(c) and c.atom not in joined
+    ]
+    assert not missing, f"declared but never generated: {missing}"
+
+
+@pytest.mark.parametrize(
+    "build,texts",
+    [(SURFACE, SURFACE_CORPUS), (LOOKAROUNDS, LOOKAROUND_CORPUS)],
+    ids=["surface", "lookaround"],
+)
+@pytest.mark.parametrize("semantics", [Semantics.FULLMATCH, Semantics.SEARCH])
+@pytest.mark.parametrize("seed", range(8))
+def test_every_generated_pattern_accepts_what_re_accepts(
+    seed: int, semantics: Semantics, build, texts
+) -> None:
+    """One pattern's automaton against `re`, string by string.
+
+    The tests above compare *verdicts* about pairs, and a verdict is only
+    wrong when two patterns are wrong in different ways — so a rule the whole
+    engine applies uniformly hides from them. Python's `$` also matches just
+    before a string-final newline; this engine folded it as plain
+    end-of-string, and over 21,000 generated pairs that produced exactly one
+    failure, by luck rather than by coverage.
+
+    Comparing membership directly has no such cancellation: `b$` against
+    "b\\n" is a one-pattern, one-string disagreement. This is the check the
+    real-world corpora are run through, brought into the suite.
+    """
+    rng = random.Random(seed)
+    accepts = method_for(semantics)
+    checked = 0
+
+    for _ in range(150):
+        pattern = build(rng)
+        try:
+            compiled = re.compile(pattern)
+        except re.error:
+            continue
+        try:
+            node, literals = parse(pattern, semantics=semantics)
+            dfa = build_dfa(node, tuple(sorted(set(CORPUS_ALPHABET) | set(literals))))
+        except Unsupported:
+            continue  # a stated refusal is not a wrong answer
+
+        checked += 1
+        ground_truth = matcher(compiled, accepts)
+        for text in texts:
+            assert dfa.accepts(text) == ground_truth(text), (
+                f"{pattern!r} under {semantics.name}: automaton "
+                f"{'accepts' if dfa.accepts(text) else 'rejects'} {text!r}, "
+                f"`re`.{accepts} says otherwise"
+            )
+
+    assert checked > 20, "too few analyzable patterns to be meaningful"

@@ -1,8 +1,22 @@
+import itertools
 import re
 
 import pytest
 
 from regexbench import Dialect, Semantics, Verdict, equivalent, is_regular
+from regexbench._automata import build_dfa
+from regexbench._parse import ATOMIC_GROUP_SUPPORTED, POSSESSIVE_SUPPORTED, parse
+
+# Both arrived in CPython 3.11, and the parser refuses what the running `re`
+# cannot compile — so on 3.10 these are `UNSUPPORTED` rather than decided, and
+# asserting the decided answer there would be asserting against the
+# interpreter the verdicts are measured on.
+needs_possessive = pytest.mark.skipif(
+    not POSSESSIVE_SUPPORTED, reason="possessive quantifiers need CPython 3.11+"
+)
+needs_atomic = pytest.mark.skipif(
+    not ATOMIC_GROUP_SUPPORTED, reason="atomic groups need CPython 3.11+"
+)
 
 
 @pytest.mark.parametrize(
@@ -64,16 +78,15 @@ def test_backreferences_are_undecidable_not_guessed(pattern):
 
 
 @pytest.mark.parametrize("pattern", [r"(?=a)b", r"(?!a)b", r"(?<=a)b", r"(?<!a)b"])
-def test_lookaround_is_unsupported_not_undecidable(pattern):
-    """Lookaround alone preserves regularity — this is decidable, just unbuilt.
-
-    Only combining lookaround with backreferences escapes the regular
-    languages. Calling it undecidable would be a claim about the problem when
-    it is a statement about this engine.
-    """
+def test_lookaround_is_decided_not_undecidable(pattern):
+    """Lookaround alone stays in the regular languages, so equivalence with a
+    plain pattern must be decided, not refused — and not escaped to
+    undecidable, which would be a claim about the problem rather than this
+    engine."""
     result = equivalent(pattern, r"a")
-    assert result.verdict is Verdict.UNSUPPORTED
-    assert not is_regular(pattern), "not analyzable here, whatever the theory says"
+    assert result.verdict is Verdict.DIFFERENT
+    assert result.witness is not None
+    assert is_regular(pattern)
 
 
 def test_undecidable_is_reported_for_either_side():
@@ -213,7 +226,6 @@ def test_assertions_survive_an_intersection_forced_to_the_empty_string():
 @pytest.mark.parametrize(
     "pattern",
     [
-        r"(^a)",
         r"a|^b",
         r"(a$|b)",
         r"a^",
@@ -223,9 +235,21 @@ def test_assertions_survive_an_intersection_forced_to_the_empty_string():
 def test_anchors_off_the_pattern_edges_are_refused_under_search(pattern):
     """SEARCH widens patterns to `.*p.*`, which cannot respect a `^`/`$` that
     is not at the very edges of the pattern — so those are refused rather than
-    mis-answered."""
+    mis-answered. A transparent group around the anchor is still the edge,
+    which the fold below covers."""
     result = equivalent(pattern, r"a|b", semantics=Semantics.SEARCH)
     assert result.verdict is Verdict.UNSUPPORTED, f"{pattern!r}"
+
+
+def test_anchors_behind_a_transparent_group_still_fold_under_search():
+    # `(^a)` is `^a`: the group consumes nothing, so the anchor is the true
+    # pattern edge and search must respect it.
+    result = equivalent(r"(^a)", r"a|b", semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.DIFFERENT
+    assert result.witness is not None
+    in_left = re.search(r"(^a)", result.witness) is not None
+    in_right = re.search(r"a|b", result.witness) is not None
+    assert in_left != in_right
 
 
 def test_anchors_at_the_edges_still_survive_under_search():
@@ -593,6 +617,7 @@ def test_group_wrapped_repeats_may_be_requantified():
         (r"a?+", r"a?"),
     ],
 )
+@needs_possessive
 def test_possessive_quantifier_at_branch_end(left, right):
     """A possessive quantifier seals the repetition count, which only matters
     when later text could backtrack into it; at the end of a branch it matches
@@ -605,6 +630,7 @@ def test_possessive_quantifier_at_branch_end(left, right):
     "pattern",
     [r"a{2,3}+b", r"(a{2,3}+)*", r"a*+b", r"(a{2,3}+|b)c", r"(a|ab){2}+", r"(a|b){2,3}+"],
 )
+@needs_possessive
 def test_possessive_quantifier_mid_pattern_is_refused(pattern):
     """Mid-pattern, `a{2,3}+b` genuinely differs from `a{2,3}b` — the sealed
     count cannot be given back — and over an ambiguous atom even a final
@@ -623,6 +649,7 @@ def test_possessive_quantifier_mid_pattern_is_refused(pattern):
         (r"(?>(ab))+", r"(ab)+"),
     ],
 )
+@needs_atomic
 def test_atomic_groups_with_unique_matches(left, right):
     """An atomic group only changes the language when its content could match
     several ways; content that matches exactly one way is transparent."""
@@ -634,6 +661,7 @@ def test_atomic_groups_with_unique_matches(left, right):
     "pattern",
     [r"(?>a|ab)b", r"(?>a+)b", r"(?>a|b)*", r"(?>a|ab)", r"(?>a+)", r"(?>a|b)"],
 )
+@needs_atomic
 def test_atomic_groups_with_ambiguous_content_are_refused(pattern):
     """`(?>a|ab)` seals the alternation's greedy choice, so it fullmatches
     only "a" — not `a|ab`; `(?>a|ab)b` differs from `(a|ab)b` on "aab". Both
@@ -672,3 +700,164 @@ def test_anchor_resolution_does_not_explode_on_deep_nesting():
     result = equivalent(pattern, "x")
     assert time.monotonic() - started < 10, "anchor resolution blew up again"
     assert result.verdict is Verdict.UNSUPPORTED, result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"^(a|b)$", r"^((0[1-9])|(1[0-2]))$", r"^(ab|cd)$", r"^a$"],
+)
+def test_a_grouped_alternation_keeps_its_anchors_whole_under_search(pattern):
+    """`(?:^(a|b)$)` is `^(a|b)$`, and both anchor the whole alternation.
+
+    `_widen_for_search` distributes its wildcards over an alternation's
+    branches, which is right for `^a|b$` — there the `^` binds to the first
+    branch only — and wrong here. The parser folds an edge anchor to `Empty()`
+    and leaves a `Concat`, so the distribution never fires; `_fold_edge_anchors`
+    removed the anchor instead, collapsing to a bare `Alternate`, and
+    `(?:^(a|b)$)` came back matching "aa".
+    """
+    wrapped = f"(?:{pattern})"
+    result = equivalent(pattern, wrapped, semantics=Semantics.SEARCH)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
+    for text in ["", "a", "b", "aa", "ab", "01", "010", "12"]:
+        assert (re.search(pattern, text) is not None) == (
+            re.search(wrapped, text) is not None
+        )
+
+
+# --------------------------------------------------------------------------
+# Python's `$` is not end-of-string
+# --------------------------------------------------------------------------
+
+
+DOLLAR_ALPHABET = "ab\n"
+DOLLAR_TEXTS = [""] + [
+    "".join(combo)
+    for length in (1, 2, 3, 4)
+    for combo in itertools.product(DOLLAR_ALPHABET, repeat=length)
+]
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (r"b$", r"b"),
+        (r"(a|\n)b$", r"(a|\n)b"),
+        (r"^$", r"\n?"),
+        (r"\s$", r"\s"),
+        (r"^b$", r"b"),
+        (r"a$", r"a"),
+    ],
+)
+def test_search_verdicts_about_a_trailing_dollar_match_re(left, right):
+    r"""`re.search("b$", "b\n")` finds a match, so the reduction must too.
+
+    Without `re.MULTILINE`, `$` matches at the end of the subject *and* just
+    before a newline that ends it. The search reduction folded a trailing `$`
+    into "drop the wildcard on that end", which said the subject had to stop
+    where the match did — so `(a|\n)b` and `(a|\n)b$` were reported different
+    on the witness "\nb\n", which `re` matches both ways. Several of these
+    pairs really are different; what the bug produced was a *wrong reason*,
+    so the witness is checked against `re` rather than only the verdict.
+    """
+    result = equivalent(left, right, semantics=Semantics.SEARCH)
+    assert result.verdict in (Verdict.EQUIVALENT, Verdict.DIFFERENT), result.reason
+
+    def separates(text):
+        return (re.search(left, text) is not None) != (
+            re.search(right, text) is not None
+        )
+
+    truth = next((t for t in DOLLAR_TEXTS if separates(t)), None)
+    if result.verdict is Verdict.EQUIVALENT:
+        assert truth is None, f"claimed equivalent, but `re` differs on {truth!r}"
+    else:
+        assert result.witness is not None, "DIFFERENT without a witness"
+        assert separates(result.witness), (
+            f"witness {result.witness!r} does not separate them under `re`"
+        )
+
+
+@pytest.mark.parametrize("text", ["", "b", "b\n", "\nb\n", "b\n\n", "\n", "ab\n"])
+@pytest.mark.parametrize("pattern", [r"b$", r"^b$", r"(a|\n)b$", r"\s$", r"^$"])
+def test_the_search_reduction_agrees_with_re_on_newline_endings(pattern, text):
+    """The reduction itself, checked against `re` on subjects ending in "\n"."""
+    node, literals = parse(pattern, semantics=Semantics.SEARCH)
+    alphabet = tuple(sorted(set(literals) | set(text) | {"a", "b", "\n"}))
+    dfa = build_dfa(node, alphabet)
+    assert dfa.accepts(text) == (re.search(pattern, text) is not None), (
+        f"{pattern!r} on {text!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"a$\n", r"$\n", r"[ab\n]$(a|\n)", r"\s$\s", r"(?=a$)a\n", r"(a$\n)+"],
+)
+def test_a_dollar_before_a_possible_newline_is_refused_under_fullmatch(pattern):
+    r"""Full-match verdicts cannot fold `$` when a newline may follow it.
+
+    `re.fullmatch(r"a$\n", "a\n")` matches — the `$` sits before the subject's
+    final newline — but anchor resolution folds `$` to plain end-of-string and
+    made the branch the empty language, so `a$\n` came back different from
+    `a\n`. Unlike the search reduction there is no wrapper to widen here, so
+    the answer is refused rather than guessed.
+    """
+    result = equivalent(pattern, "x", semantics=Semantics.FULLMATCH)
+    assert result.verdict is Verdict.UNSUPPORTED, result.reason
+    assert "newline" in result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"a$", r"^a$", r"\s*$", r"^(a|b)$", r"a$|b$", r"(^a$)*", r"a$b"],
+)
+def test_a_dollar_with_no_newline_after_it_is_still_decided(pattern):
+    """The refusal above is drawn tight: a `$` nothing can follow still works.
+
+    A trailing `$` is the overwhelmingly common shape and stays decided, and
+    so does `a$b`, where the text after the anchor cannot be a newline.
+    """
+    result = equivalent(pattern, pattern, semantics=Semantics.FULLMATCH)
+    assert result.verdict is Verdict.EQUIVALENT, result.reason
+
+
+@pytest.mark.parametrize(
+    "pattern,matches",
+    [
+        (r"a$(^)+", []),
+        (r"a?$(^)+", [""]),
+        (r"(a$)+$(^)+", []),
+        (r"a$(b|^)", []),
+        (r"a?$(b|^)", [""]),
+        (r"[ab]($)(^)+", []),
+        (r"a$(^)*", ["a"]),
+        (r"$(^)+", [""]),
+        (r"(^)+^a", ["a"]),
+        (r"^(a|$)b", ["ab"]),
+    ],
+)
+def test_an_anchor_nested_in_a_collapsed_region_still_binds(pattern, matches):
+    r"""A `^` after a `$` is still a `^`, even once the `$` empties the tail.
+
+    `a$` forces everything after it to be the empty string, and the resolver
+    collapses that tail — but "empty text" is not "no constraint": the `^` in
+    `a$(^)+` demands position zero, and the `a` in front of it makes that
+    impossible, so `re` matches nothing. The scan that finds anchors only
+    looks at the concatenation's own parts, so a `^` one group down was
+    dropped with the rest of the tail and the pattern came back matching "a".
+
+    The tail can hold an anchor whenever the middle is empty too, which is
+    why `a?$(^)+` still matches the empty string.
+    """
+    alphabet = ("a", "b")
+    texts = [""] + [
+        "".join(combo)
+        for length in (1, 2, 3)
+        for combo in itertools.product(alphabet, repeat=length)
+    ]
+    assert [t for t in texts if re.fullmatch(pattern, t)] == matches, "bad expectation"
+
+    node, _ = parse(pattern, semantics=Semantics.FULLMATCH)
+    dfa = build_dfa(node, alphabet)
+    assert [t for t in texts if dfa.accepts(t)] == matches

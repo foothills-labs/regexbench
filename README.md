@@ -34,13 +34,13 @@ and equivalence is then formally undecidable. Rather than guess, the verdict is
 
 ```python
 equivalent(r"(a)\1", r"aa").verdict     # <Verdict.UNDECIDABLE>
-equivalent(r"(?=a)ab", r"ab").verdict   # <Verdict.UNSUPPORTED>
+equivalent(r"(?=a)ab", r"ab").verdict   # <Verdict.EQUIVALENT>
 ```
 
-The two are kept apart on purpose. Lookaround *is* regular — it only escapes
-the regular languages when combined with backreferences — so refusing it is a
-statement about this engine, not about the problem. `UNDECIDABLE` means nothing
-can answer; `UNSUPPORTED` means this does not.
+The two are kept apart on purpose. Lookaround is regular — it only escapes the
+regular languages when combined with backreferences — so it is decided exactly
+(lookahead and fixed-width lookbehind), and `UNDECIDABLE` is reserved for
+patterns where nothing can answer.
 
 **Shorthand classes follow `re`, which means Unicode.** `\d` matches every
 Unicode digit, so it is not `[0-9]`:
@@ -197,6 +197,33 @@ easy half reports a number nobody can interpret.
 See [docs/benchmarks.md](docs/benchmarks.md) for where to download each one and
 what coverage to expect.
 
+## Checking the engine itself
+
+Everything above compares two *patterns*. `crosscheck` compares one pattern's
+automaton to `re`, string by string, which is the sharper question — and the
+one that finds bugs in this package:
+
+```python
+from regexbench import crosscheck
+
+crosscheck(r"(ab)+").agreement       # <Agreement.AGREES>
+crosscheck(r"(a)\1").agreement       # <Agreement.UNCHECKED> — a stated refusal
+crosscheck(r"(a)\1").reason          # 'backreferences make the language non-regular'
+```
+
+A *verdict* about a pair only goes wrong when the two patterns go wrong in
+different ways, so a mistake this engine makes uniformly cancels out of it.
+Membership has no such cancellation. Point it at a file of patterns:
+
+```bash
+regexbench crosscheck uniq-regexes-8.json --registry pypi
+```
+
+That is how the last five wrong-answer bugs here were found, on corpora of
+regexes people actually wrote rather than on anything curated. If you are
+deciding whether to trust a verdict from this package, run it on your own
+patterns.
+
 ## Scoring a whole model
 
 ```python
@@ -229,9 +256,12 @@ and a 0% pass@1 would read as a model failing a question nobody asked it.
 questions. The plain figure counts undecidable comparisons as failures: how
 much of the corpus was *verified* correct, a lower bound that cannot flatter.
 The `(decided)` figure drops those tasks from the denominator: how much of what
-could be checked was correct, the model alone. On KB13 the gold answers
-themselves score 51.1% and 100.0% — a 49-point spread that is not a model
-result at all, but the `\b` gap in this engine.
+could be checked was correct, the model alone. On Re(gEx|DoS)Eval the spread is
+the engine's coverage: 86.6% of its references parse under the search
+semantics it is scored with, so on the other 13.4% every candidate that is not
+textually identical comes back undecidable and scores zero under the first
+reading. (KB13 used to be the example here, when word boundaries were refused;
+all three dk.brics corpora parse in full now.)
 
 ## CLI
 
@@ -269,6 +299,14 @@ full-match semantics `^` can only hold where everything before it is empty, so
 `a^` is the empty language, `a?^c` is `c`, and `(^a)*` is `a?` — the same
 strings Python matches. Under `SEARCH` semantics an anchor away from the ends
 is refused instead: the `.*p.*` rewrite cannot express it.
+
+`$` is not end-of-string. Without `re.MULTILINE`, Python's `$` also matches
+immediately before a newline that ends the subject, so `re.search(r"b$", "b\n")`
+finds a match and `re.fullmatch(r"a$\n", "a\n")` is not the empty language.
+Under `SEARCH` the reduction allows exactly that one trailing newline. Under
+`FULLMATCH` there is nothing to widen, so a `$` sitting in front of text that
+could be that newline is refused; a `$` at the end of the pattern is decided as
+usual.
 
 Patterns Python's own parser rejects are rejected here too — `a**`, `\b*`,
 `\q`, `[\d-z]`. A pattern that cannot run under `re` should not get a verdict
@@ -309,7 +347,10 @@ Known limits, in the order they cost you coverage:
 
 | Construct | Status |
 | --- | --- |
-| Lookaround | `UNSUPPORTED` — regular, not built. 5.6% of Re(gEx|DoS)Eval |
+| `^` / `$` away from the pattern ends, under `SEARCH` | `UNSUPPORTED` — the `.*p.*` rewrite has nowhere to put them. 9.8% of Re(gEx|DoS)Eval; resolved exactly under `FULLMATCH` |
+| `$` inside a lookaround body, under `SEARCH` | `UNSUPPORTED` — the subject can always carry one more newline, which the fold cannot express. 1.2% of Re(gEx|DoS)Eval |
+| Lookaround | Supported — `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` built into the automata. Refused for a variable-width lookbehind, a `\b` immediately in front of one or at the right edge of a lookbehind body, or one inside a dk.brics `&`/`~` operand. Nesting is decided only inside a positive lookahead, at the body's start, on every path |
+| `$` before text that could be the subject's final newline, under `FULLMATCH` | `UNSUPPORTED` — Python's `$` matches there too, and folding the anchor cannot say so. 1.2% of Re(gEx|DoS)Eval; exact under `SEARCH` |
 | Backreferences | `UNDECIDABLE` — no engine can answer this |
 | `[\D0-9]` — a negated shorthand mixed with other members | `UNSUPPORTED` — not one character set |
 | Possessive quantifiers, atomic groups | `UNSUPPORTED` unless the body matches exactly one way |

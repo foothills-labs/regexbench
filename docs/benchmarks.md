@@ -46,7 +46,7 @@ Scoring the corpus against itself — `--use-reference` — gives:
 | --- | --- | --- |
 | `pass@1` | 99.9–100% | the references pass their own tests, so the corpus is loaded correctly |
 | `dfa-eq@1` | 100% | reflexivity — identical patterns, no automaton consulted |
-| `vulnerable@1` | 12.7% | 97 of the corpus's own reference expressions are ReDoS-vulnerable |
+| `vulnerable@1` | 13.1% | 100 of the corpus's own reference expressions are ReDoS-vulnerable |
 
 `dfa-eq@1` of 100% here is not a coverage measurement. Identical text denotes
 identical languages, so `equivalent()` short-circuits before parsing — which is
@@ -62,21 +62,30 @@ tasks = load_regexeval("RegexEval.json")
 analyzable = sum(
     is_regular(t.reference, semantics=t.semantics, dialect=t.dialect) for t in tasks
 )
-print(f"{analyzable}/{len(tasks)}")     # 629/762 = 82.5%
+print(f"{analyzable}/{len(tasks)}")     # 660/762 = 86.6%
 ```
 
 | Corpus | References this engine can parse |
 | --- | --- |
-| Re(gEx|DoS)Eval | 82.5% |
+| Re(gEx|DoS)Eval | 86.6% |
 | KB13 | 100% |
 | NL-RX-Synth / NL-RX-Turk | 100% |
 
 **Pass the corpus's own `semantics`.** It changes the answer, and the default
-flatters this corpus: 705 of the 762 references parse under FULLMATCH (92.5%)
-but only 629 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The
-difference is the 10.4% that anchor away from the pattern ends — resolved
+flatters this corpus: 731 of the 762 references parse under FULLMATCH (95.9%)
+but 660 under SEARCH, which is how Re(gEx|DoS)Eval is scored. The difference
+is the 9.8% — 75 references — that anchor away from the pattern ends: resolved
 exactly under a full match, refused under a search, where the `.*p.*` rewrite
-has nowhere to put them.
+has nowhere to put them, plus nine more whose `$` sits inside a lookaround
+body, where a search subject can always carry one more newline. Thirteen
+references go the other way, refused under FULLMATCH — nine because a `$` sits
+in front of text that could be the subject's final newline, and four because
+resolving their anchors exceeds the node budget — and accepted under SEARCH
+because the fold means those anchors are never resolved, so the two counts
+differ by 71 rather than 84.
+(Lookahead and fixed-width lookbehind are decided exactly under
+both semantics; what a SEARCH refuses here is a `^` or `$` that no zero-width
+prefix or suffix can carry to the pattern edge.)
 
 Treat that as an **upper bound** on comparability rather than a guarantee. Both
 sides of a comparison contribute to the alphabet, so a reference that parses on
@@ -97,7 +106,7 @@ tasks means a vulnerable gold pattern raced the timeout.
 
 The `vulnerable@1` row is a property of the dataset rather than of this tool,
 and is roughly the point the paper is making — `regexeval/1660` above is one of
-the 97.
+the 100.
 
 ---
 
@@ -203,8 +212,8 @@ number cannot answer both:
   what we could check, how much was correct" — the model on its own, blind to
   engine coverage.
 
-Re(gEx|DoS)Eval makes the spread concrete: 82.5% of its references parse under
-the search semantics it is scored with, so on the other 17.5% every candidate
+Re(gEx|DoS)Eval makes the spread concrete: 86.6% of its references parse under
+the search semantics it is scored with, so on the other 13.4% every candidate
 that is not textually identical comes back undecidable and scores zero under
 the first reading. Watch both, and treat a gap between them as a statement
 about this engine rather than about whatever you are scoring.
@@ -237,9 +246,11 @@ Measured on Re(gEx|DoS)Eval, one candidate costs about **75 ms**, split:
 **That equivalence figure is a `--use-reference` figure**, and `--use-reference`
 compares each pattern with itself, so `equivalent()` short-circuits on
 identical text and never builds an automaton. Against candidates that actually
-differ, the same corpus measures a median of **0.3 ms** and a mean of
-**191 ms** — the mean is the whole story, because the distribution has a long
-tail and the slowest single comparison took **13.6 s**. The expensive ones are
+differ, the same corpus measures a median of **3 ms** and a mean of
+**484 ms** — the mean is the whole story, because the distribution has a long
+tail and the slowest single comparison took **19 s**. Deciding lookaround
+rather than refusing it moved all three, because the patterns that used to
+come back UNSUPPORTED in microseconds are now answered. The expensive ones are
 wide alternations over large alphabets: date formats spelling out every month,
 or VAT numbers spelling out every country code.
 
@@ -247,7 +258,7 @@ Budget from the mean, not the median, and use `--workers`.
 
 Screening dominates, and it is the part that has to start processes: the only
 way to know a pattern hangs is to run it somewhere killable. A `--use-reference`
-pass over all 762 tasks takes about 20 seconds.
+pass over all 762 tasks takes about 25 seconds at `--workers 8`.
 
 Equivalence on the dk.brics corpora costs more, and varies by an order of
 magnitude between them:
@@ -267,7 +278,7 @@ answering is cheaper than answering. Use `--workers`.
 Vulnerable candidates cost more, and unavoidably so: confirming a hang means
 waiting out the timeout, once per example. A candidate that hangs on all 25 of
 a task's examples costs 25 seconds at the default one-second budget. That is
-not a rare case — 12.7% of the corpus's own references are vulnerable, so a
+not a rare case — 13.1% of the corpus's own references are vulnerable, so a
 model trained on this kind of data will produce plenty.
 
 Two levers:
@@ -287,6 +298,65 @@ corpus's own strings.
 So change it once, deliberately, and keep it fixed across runs you intend to
 compare — a timeout is part of a score's definition, not a tuning knob to reach
 for after seeing the number.
+
+## Validation corpora
+
+The corpora above are what a score is *reported* on. They are not enough to
+trust the engine, because 762 curated references exercise the constructs a
+curator chose. Three larger corpora of regexes written by people who were not
+thinking about this tool are used to check the engine instead, all from the
+[LinguaFranca FSE'19 artifact](https://github.com/VTLeeLab/LinguaFranca-FSE19)
+(MIT):
+
+| | Unique patterns | File |
+| --- | --- | --- |
+| Production | 537,806 (43,896 used by PyPI modules) | `data/production-regexes/uniq-regexes-8.json` |
+| Stack Overflow | 495,135 | `data/internet-regexes/stackoverflow/data/` |
+| RegExLib | 3,838 | `data/internet-regexes/regexlib/data/` |
+
+```python
+from regexbench import crosscheck
+from regexbench.datasets import load_linguafranca
+
+patterns = load_linguafranca("uniq-regexes-8.json", registry="pypi")
+bad = [p for p in patterns if not crosscheck(p)]
+```
+
+or, the same thing with a progress meter and a breakdown of the refusals:
+
+```bash
+regexbench crosscheck uniq-regexes-8.json --registry pypi
+regexbench crosscheck uniq-regexes-8.json --registry pypi --search
+```
+
+`crosscheck` compiles the pattern to a DFA over a small alphabet — up to four
+of its own literals, one character it never names, and a newline — and compares
+every string up to three characters against `re`. A refusal is not a failure;
+it is a stated answer, and it is counted separately.
+
+| Corpus | Semantics | Crosschecked | Strings compared | Unchecked | Disagreements |
+| --- | --- | --- | --- | --- | --- |
+| Production (PyPI) | fullmatch | 41,741 | 8,000,925 | 2,155 | 0 |
+| Production (PyPI) | search | 40,913 | 7,423,707 | 2,983 | 0 |
+| Stack Overflow¹ | fullmatch | 33,212 | 6,217,008 | 6,788 | 0 |
+| Stack Overflow¹ | search | 28,462 | 5,059,284 | 11,538 | 0 |
+| RegExLib | fullmatch | 2,979 | 671,414 | 859 | 0 |
+| RegExLib | search | 2,898 | 534,573 | 940 | 0 |
+
+¹ the first 40,000 of its 495,135, which is where the sweep was bounded, not
+where it stopped finding things.
+
+**Restrict the production corpus to one registry.** The other seven languages'
+regexes are written against engines with syntax `re` does not have, so counting
+those as unsupported measures the dialect gap rather than this engine.
+
+These runs are how six wrong-answer bugs were found: an identity-keyed memo
+that could read another node's answer, `$` folded as plain end-of-string, an
+anchor dropped from a region a `$` collapsed, chained assertion markers firing
+as alternatives, `$` inside a lookaround body under search, and a word boundary
+at the right edge of a lookbehind window. None was reachable by the test suite
+at the time; each is now, and 355 of these patterns are checked in under
+`tests/data/` so the suite keeps running real-world syntax without a download.
 
 ## References
 
@@ -330,8 +400,9 @@ Two further points confirmed against sources rather than assumed:
 
 - **Lookaround preserves regularity.** Zero-width lookaround assertions do not
   take a pattern outside the regular languages; only combining them with
-  backreferences does, which lands the class at NLOG. So `regexbench` reports
-  lookaround as UNSUPPORTED (decidable, unimplemented) rather than UNDECIDABLE.
+  backreferences does, which lands the class at NLOG. So `regexbench` decides
+  lookaround exactly — lookahead and fixed-width lookbehind — and reports the
+  combination with backreferences as UNDECIDABLE, never as a guessed answer.
 - **Python's shorthand classes are Unicode-aware for text patterns.** `\d`,
   `\w`, `\s`, `\b` and `\B` match Unicode by default and only become
   ASCII-only under `re.ASCII` — see the
