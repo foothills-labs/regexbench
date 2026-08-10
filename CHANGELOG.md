@@ -5,7 +5,20 @@ Notable changes to `regexbench`. Format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with the caveat
 that a 0.x line makes no stability promise.
 
-## Unreleased
+## 0.4.0 — 2026-08-10
+
+Lookaround is decided rather than refused, and fourteen wrong answers are
+gone. Most of those were found by three things this release also adds: a
+runtime check that every AST walker names every node type, a differential
+generator whose alphabet is derived from the declared syntax surface instead
+of maintained by hand, and `crosscheck` — comparing one pattern's automaton to
+`re` string by string, over half a million regexes people actually wrote.
+
+**Anyone on 0.3.0 should upgrade.** Every fix below is a wrong verdict, not a
+crash: patterns that came back EQUIVALENT or DIFFERENT when the opposite was
+true. Coverage moves both ways — lookaround adds a great deal, and the `$`
+refusals take Re(gEx|DoS)Eval's SEARCH score from 669/762 to 660/762, because
+those nine were being answered wrongly on any subject ending in a newline.
 
 ### Added
 
