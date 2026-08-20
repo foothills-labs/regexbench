@@ -5,6 +5,28 @@ Notable changes to `regexbench`. Format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with the caveat
 that a 0.x line makes no stability promise.
 
+## 0.4.1 — 2026-08-20
+
+### Fixed
+
+- **`pass_at_k` scored any task with fewer than `k` samples as a full
+  pass** ([#8](https://github.com/foothills-labs/regexbench/issues/8)). The
+  `n - c < k` shortcut — "so many samples succeeded that any k must include
+  one" — is sound only for `n >= k`; below it, it fired unconditionally, so
+  a task that lost samples to a refusal or a budget cap scored 1.0 on every
+  metric whether or not anything succeeded (`pass_at_k(1, 0, 3) == 1.0`).
+  Measured on a published eleven-model run, the inflation landed exactly on
+  the two models that lost the most samples — the two at the top of the
+  table — moving one of them two places.
+
+  `pass_at_k` now raises `ValueError` for `n < k`, since the Chen et
+  al. estimator is undefined there and the right treatment of a short task
+  (exclude it, or score at `@n`) is the caller's call to make explicitly.
+  `SuiteReport` excludes short tasks from every `@k` metric, and reports the
+  exclusion: `summary()` gains a `short_of_k` count per `k`, and
+  `SuiteReport.short_of(k)` is public, so a shrunken denominator is visible
+  rather than silent.
+
 ## 0.4.0 — 2026-08-10
 
 Lookaround is decided rather than refused, and fourteen wrong answers are

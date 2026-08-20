@@ -61,6 +61,14 @@ def pass_at_k(n: int, c: int, k: int) -> float:
     `n` samples were generated and `c` of them succeeded. Computed as a
     product rather than with binomial coefficients, which overflow and lose
     precision well before benchmark-sized numbers do.
+
+    Defined only for `n >= k`, like the estimator it implements (Chen et
+    al. 2021). Earlier versions returned 1.0 for any `n < k`, because the
+    every-k-subset-contains-a-success shortcut below fired unconditionally
+    there -- a task that lost samples to a refusal or a budget scored a full
+    pass on every metric whether or not anything succeeded. Callers decide
+    what to do with short tasks (the suite aggregation excludes them and
+    counts the exclusions); this function refuses to guess.
     """
     if k <= 0:
         raise ValueError(f"k must be positive, got {k}")
@@ -68,6 +76,11 @@ def pass_at_k(n: int, c: int, k: int) -> float:
         raise ValueError(f"n must be positive, got {n}")
     if c < 0 or c > n:
         raise ValueError(f"c must be between 0 and n={n}, got {c}")
+    if n < k:
+        raise ValueError(
+            f"pass@{k} is undefined on {n} sample(s): the estimator needs "
+            f"n >= k. Score short tasks at @n or exclude them -- explicitly."
+        )
     if n - c < k:
         return 1.0
     estimate = 1.0
@@ -250,13 +263,25 @@ class SuiteReport:
         qualifies: Callable[[TaskResult], bool],
         successes: Callable[[TaskResult], int],
     ) -> float | None:
+        # Tasks with fewer than k samples are excluded, not scored on what
+        # arrived: the estimator is undefined below k, and the old behaviour
+        # -- crediting them as full passes -- inflated every metric exactly
+        # where collection was flakiest. short_of(k) reports the exclusions.
         scores = [
             pass_at_k(result.samples, successes(result), k)
             for result in self.results
-            if qualifies(result) and result.samples
+            if qualifies(result) and result.samples >= k
         ]
         # A metric nobody was asked is undefined, not zero.
         return sum(scores) / len(scores) if scores else None
+
+    def short_of(self, k: int) -> int:
+        """How many answered tasks have fewer than `k` samples.
+
+        These are excluded from every @k metric, so any nonzero count means
+        the @k denominators are smaller than `answered`. Report it next to
+        the table rather than letting the denominator drift silently."""
+        return sum(1 for result in self.results if 0 < result.samples < k)
 
     def summary(self, ks: Sequence[int] = (1,)) -> dict[str, object]:
         """Everything the table shows, as plain data."""
@@ -275,6 +300,7 @@ class SuiteReport:
             "unanswered": self.unanswered,
             "undecided": self.undecided,
             "errors": self.errors,
+            "short_of_k": {k: self.short_of(k) for k in ks},
             "metrics": metrics,
         }
 

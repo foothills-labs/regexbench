@@ -32,6 +32,20 @@ class TestPassAtK:
         with pytest.raises(ValueError):
             pass_at_k(n, c, k)
 
+    @pytest.mark.parametrize("n,c,k", [(1, 0, 3), (2, 0, 3), (2, 2, 3), (1, 1, 2)])
+    def test_short_tasks_are_refused_not_credited(self, n, c, k):
+        # Regression for the 0.4.0 defect: n < k fell into the
+        # every-k-subset-contains-a-success shortcut and returned 1.0 --
+        # a task with one failed sample scored a full pass at k=3. The
+        # estimator is undefined below k, so this must raise, successes
+        # and failures alike.
+        with pytest.raises(ValueError):
+            pass_at_k(n, c, k)
+
+    def test_the_shortcut_still_fires_at_n_equals_k(self):
+        assert pass_at_k(3, 1, 3) == 1.0  # any 3 of 3 includes the success
+        assert pass_at_k(3, 0, 3) == 0.0
+
 
 def digits_task(name: str = "digits") -> Task:
     return Task(
