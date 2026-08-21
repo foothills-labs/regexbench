@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-authors = [{ name = "Foothills Labs" }]
+authors = [{ name = "Plicara Labs" }]
 keywords = ["regex", "evaluation", "benchmark", "redos", "llm", "automata"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -32,11 +32,11 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 regexbench = "regexbench.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/foothills-labs/regexbench"
-Repository = "https://github.com/foothills-labs/regexbench"
-Issues = "https://github.com/foothills-labs/regexbench/issues"
-Documentation = "https://github.com/foothills-labs/regexbench/blob/main/docs/benchmarks.md"
-Changelog = "https://github.com/foothills-labs/regexbench/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/plicara/regexbench"
+Repository = "https://github.com/plicara/regexbench"
+Issues = "https://github.com/plicara/regexbench/issues"
+Documentation = "https://github.com/plicara/regexbench/blob/main/docs/benchmarks.md"
+Changelog = "https://github.com/plicara/regexbench/blob/main/CHANGELOG.md"
 
 [build-system]
 # hatchling 1.27 is the floor for PEP 639: below it, `license = "Apache-2.0"`

@@ -3,7 +3,7 @@
 ## Getting set up
 
 ```bash
-git clone https://github.com/foothills-labs/regexbench
+git clone https://github.com/plicara/regexbench
 cd regexbench
 pip install -e ".[dev]"
 pytest -q
