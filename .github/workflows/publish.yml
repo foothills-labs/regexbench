@@ -4,7 +4,7 @@
 #   1. GitHub -> Settings -> Environments -> create an environment named `pypi`.
 #   2. PyPI -> Your projects -> Publishing -> Add a pending publisher:
 #        Project name:  regexbench
-#        Owner / Repo:  foothills-labs / regexbench
+#        Owner / Repo:  plicara / regexbench
 #        Workflow:      publish.yml
 #        Environment:   pypi
 #

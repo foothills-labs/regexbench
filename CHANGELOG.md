@@ -10,7 +10,7 @@ that a 0.x line makes no stability promise.
 ### Fixed
 
 - **`pass_at_k` scored any task with fewer than `k` samples as a full
-  pass** ([#8](https://github.com/foothills-labs/regexbench/issues/8)). The
+  pass** ([#8](https://github.com/plicara/regexbench/issues/8)). The
   `n - c < k` shortcut — "so many samples succeeded that any k must include
   one" — is sound only for `n >= k`; below it, it fired unconditionally, so
   a task that lost samples to a refusal or a budget cap scored 1.0 on every
